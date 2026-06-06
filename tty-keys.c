@@ -927,6 +927,26 @@ first_key:
 			key = KEYC_BSPACE|KEYC_META;
 		}
 	}
+#ifdef _WIN32
+	if ((key & KEYC_MASK_KEY) != KEYC_BSPACE) {
+		u_char	backspace;
+		key_code option;
+
+		option = options_get_number(global_options, "backspace");
+		if (input_key_get_backspace_byte(option, &backspace) == 0) {
+			if (key == backspace) {
+				log_debug("%s: key %#llx is Windows BSpace",
+				    c->name, key);
+				key = KEYC_BSPACE;
+			}
+			if (key == (backspace|KEYC_META)) {
+				log_debug("%s: key %#llx is Windows M-BSpace",
+				    c->name, key);
+				key = KEYC_BSPACE|KEYC_META;
+			}
+		}
+	}
+#endif
 
 	/*
 	 * Fix up all C0 control codes that don't have a dedicated key into
@@ -1108,6 +1128,17 @@ tty_keys_extended_key(struct tty *tty, const char *buf, size_t len,
 		nkey = KEYC_BSPACE;
 	else
 		nkey = number;
+#ifdef _WIN32
+	if (nkey != KEYC_BSPACE) {
+		u_char	backspace;
+		key_code option;
+
+		option = options_get_number(global_options, "backspace");
+		if (input_key_get_backspace_byte(option, &backspace) == 0 &&
+		    number == backspace)
+			nkey = KEYC_BSPACE;
+	}
+#endif
 
 	/* Convert UTF-32 codepoint into internal representation. */
 	if (nkey != KEYC_BSPACE && nkey & ~0x7f) {

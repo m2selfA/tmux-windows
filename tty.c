@@ -114,7 +114,21 @@ tty_init(struct tty *tty, struct client *c)
 	tty->ccolour = -1;
 	tty->fg = tty->bg = -1;
 
-#ifndef _WIN32
+#ifdef _WIN32
+	/*
+	 * Windows does not have a real termios, so seed VERASE from tmux's
+	 * configured backspace byte for prompt and status-line editing.
+	 */
+	tty->tio.c_cc[VERASE] = '\177';
+	{
+		u_char	bspace;
+		key_code key;
+
+		key = options_get_number(global_options, "backspace");
+		if (input_key_get_backspace_byte(key, &bspace) == 0)
+			tty->tio.c_cc[VERASE] = bspace;
+	}
+#else
 	if (tcgetattr(c->fd, &tty->tio) != 0)
 		return (-1);
 #endif

@@ -32,6 +32,37 @@
 
 static void	 input_key_mouse(struct window_pane *, struct mouse_event *);
 
+int
+input_key_get_backspace_byte(key_code key, u_char *byte)
+{
+	key &= ~KEYC_MASK_FLAGS;
+
+	if ((key & KEYC_MASK_MODIFIERS) == 0) {
+		key &= KEYC_MASK_KEY;
+		if (key <= 0x7f) {
+			*byte = key;
+			return (0);
+		}
+		return (-1);
+	}
+	if ((key & KEYC_MASK_MODIFIERS) == KEYC_CTRL) {
+		key &= KEYC_MASK_KEY;
+		if (key == '?') {
+			*byte = 0x7f;
+			return (0);
+		}
+		if (key >= '@' && key <= '_') {
+			*byte = key - 0x40;
+			return (0);
+		}
+		if (key >= 'a' && key <= 'z') {
+			*byte = key - 0x60;
+			return (0);
+		}
+	}
+	return (-1);
+}
+
 /* Entry in the key tree. */
 struct input_key_entry {
 	key_code			 key;
@@ -595,17 +626,8 @@ input_key(struct screen *s, struct bufferevent *bev, key_code key)
 		    key, newkey);
 		if ((key & KEYC_MASK_MODIFIERS) == 0) {
 			ud.data[0] = 255;
-			if ((newkey & KEYC_MASK_MODIFIERS) == 0)
-				ud.data[0] = newkey;
-			else if ((newkey & KEYC_MASK_MODIFIERS) == KEYC_CTRL) {
-				newkey &= KEYC_MASK_KEY;
-				if (newkey == '?')
-					ud.data[0] = 0x7f;
-				else if (newkey >= '@' && newkey <= '_')
-					ud.data[0] = newkey - 0x40;
-				else if (newkey >= 'a' && newkey <= 'z')
-					ud.data[0] = newkey - 0x60;
-			}
+			if (input_key_get_backspace_byte(newkey, &ud.data[0]) != 0)
+				ud.data[0] = 255;
 			if (ud.data[0] != 255)
 				input_key_write(__func__, bev, &ud.data[0], 1);
 			return (0);
