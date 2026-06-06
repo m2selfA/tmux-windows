@@ -209,6 +209,15 @@ static void	input_csi_dispatch_sgr(struct input_ctx *);
 static int	input_dcs_dispatch(struct input_ctx *);
 static int	input_top_bit_set(struct input_ctx *);
 static int	input_end_bel(struct input_ctx *);
+#ifdef _WIN32
+static size_t	input_utf8_codepoint_length(const u_char *, size_t);
+static int	input_utf8_is_width1(const u_char *, size_t);
+static int	input_parse_conpty_uint(const u_char *, size_t, size_t *, u_int *);
+static int	input_parse_conpty_rewrite_cursor(const struct screen *,
+		    const u_char *, size_t, size_t *, u_int *, u_int *);
+static u_char   *input_normalize_conpty_wide_rewrite(struct input_ctx *,
+		    const u_char *, size_t, size_t *);
+#endif
 
 /* Command table comparison function. */
 static int	input_table_compare(const void *, const void *);
@@ -965,6 +974,194 @@ input_set_state(struct input_ctx *ictx, const struct input_transition *itr)
 		ictx->state->enter(ictx);
 }
 
+#ifdef _WIN32
+static size_t
+input_utf8_codepoint_length(const u_char *buf, size_t len)
+{
+	size_t	i, width;
+	u_char	ch;
+
+	if (len == 0)
+		return (0);
+
+	ch = buf[0];
+	if (ch < 0x80)
+		return (1);
+	if (ch >= 0xc2 && ch <= 0xdf)
+		width = 2;
+	else if (ch >= 0xe0 && ch <= 0xef)
+		width = 3;
+	else if (ch >= 0xf0 && ch <= 0xf4)
+		width = 4;
+	else
+		return (0);
+	if (len < width)
+		return (0);
+	for (i = 1; i < width; i++) {
+		if ((buf[i] & 0xc0) != 0x80)
+			return (0);
+	}
+	return (width);
+}
+
+static int
+input_utf8_is_width1(const u_char *buf, size_t len)
+{
+	struct utf8_data	ud;
+	utf8_wchar		wc;
+	int			width;
+
+	memset(&ud, 0, sizeof ud);
+	memcpy(ud.data, buf, len);
+	ud.size = ud.have = len;
+
+	if (utf8_towc(&ud, &wc) != UTF8_DONE)
+		return (0);
+#ifdef HAVE_UTF8PROC
+	width = utf8proc_wcwidth(wc);
+#else
+	width = wcwidth(wc);
+	if (width < 0)
+		width = (wc >= 0x80 && wc <= 0x9f) ? 0 : 1;
+#endif
+	return (width == 1);
+}
+
+static int
+input_parse_conpty_uint(const u_char *buf, size_t len, size_t *off, u_int *value)
+{
+	size_t	i = *off;
+	u_int	n = 0;
+	int	digits = 0;
+
+	while (i < len && buf[i] >= '0' && buf[i] <= '9') {
+		if (n > (UINT_MAX - (buf[i] - '0')) / 10)
+			return (0);
+		n = n * 10 + (buf[i] - '0');
+		i++;
+		digits = 1;
+	}
+	if (!digits)
+		return (0);
+
+	*off = i;
+	*value = n;
+	return (1);
+}
+
+static int
+input_parse_conpty_rewrite_cursor(const struct screen *s, const u_char *buf,
+    size_t len, size_t *consumed, u_int *cx, u_int *cy)
+{
+	size_t	off = 0;
+	u_int	row, col;
+
+	if (len < 4 || buf[0] != '\033' || buf[1] != '[')
+		return (0);
+	off = 2;
+
+	if (!input_parse_conpty_uint(buf, len, &off, &row))
+		return (0);
+
+	if (off >= len)
+		return (0);
+	if (buf[off] == ';') {
+		off++;
+		if (!input_parse_conpty_uint(buf, len, &off, &col))
+			return (0);
+		if (off >= len || (buf[off] != 'H' && buf[off] != 'f'))
+			return (0);
+		if (row == 0 || col == 0)
+			return (0);
+		*cy = row - 1;
+		*cx = col - 1;
+		off++;
+	} else if (buf[off] == 'G' || buf[off] == '`') {
+		if (row == 0)
+			return (0);
+		*cy = s->cy;
+		*cx = row - 1;
+		off++;
+	} else
+		return (0);
+
+	if (*cy >= screen_size_y(s) || *cx >= screen_size_x(s))
+		return (0);
+	*consumed = off;
+	return (1);
+}
+
+static u_char *
+input_normalize_conpty_wide_rewrite(struct input_ctx *ictx, const u_char *buf,
+    size_t len, size_t *newlen)
+{
+	static const u_char hide_cursor[] = "\033[?25l";
+	static const u_char show_cursor[] = "\033[?25h";
+	struct screen		*s = ictx->ctx.s;
+	struct grid_cell	 gc;
+	const u_char		*payload, *replacement;
+	size_t			 cursor_len, payload_len, replacement_len;
+	size_t			 prefix_len, suffix_len, trimmed;
+	u_int			 cx, cy;
+	u_char			*normalized;
+
+	prefix_len = sizeof hide_cursor - 1;
+	suffix_len = sizeof show_cursor - 1;
+
+	if (len <= prefix_len + suffix_len + 1)
+		return (NULL);
+	if (memcmp(buf, hide_cursor, prefix_len) != 0)
+		return (NULL);
+	if (memcmp(buf + len - suffix_len, show_cursor, suffix_len) != 0)
+		return (NULL);
+	if (!input_parse_conpty_rewrite_cursor(s, buf + prefix_len,
+	    len - prefix_len - suffix_len, &cursor_len, &cx, &cy))
+		return (NULL);
+
+	payload = buf + prefix_len + cursor_len;
+	payload_len = len - prefix_len - cursor_len - suffix_len;
+	if (payload_len < 2)
+		return (NULL);
+
+	grid_view_get_cell(s->grid, cx, cy, &gc);
+	if ((gc.flags & GRID_FLAG_PADDING) || gc.data.width <= 1)
+		return (NULL);
+
+	if (payload[0] == ' ') {
+		replacement_len = input_utf8_codepoint_length(payload + 1,
+		    payload_len - 1);
+		if (replacement_len == 0 || payload_len != 1 + replacement_len)
+			return (NULL);
+		replacement = payload + 1;
+		trimmed = 1;
+	} else {
+		replacement_len = input_utf8_codepoint_length(payload, payload_len);
+		if (replacement_len == 0 || payload_len != replacement_len + 2)
+			return (NULL);
+		if (payload[replacement_len] != ' ' ||
+		    payload[replacement_len + 1] != '\010')
+			return (NULL);
+		replacement = payload;
+		trimmed = 2;
+	}
+
+	if (replacement_len == 1 && replacement[0] == ' ')
+		return (NULL);
+	if (!input_utf8_is_width1(replacement, replacement_len))
+		return (NULL);
+
+	normalized = xmalloc(len - trimmed);
+	memcpy(normalized, buf, prefix_len + cursor_len);
+	memcpy(normalized + prefix_len + cursor_len, replacement,
+	    replacement_len);
+	memcpy(normalized + prefix_len + cursor_len + replacement_len,
+	    buf + len - suffix_len, suffix_len);
+
+	*newlen = len - trimmed;
+	return (normalized);
+}
+#endif
+
 /* Parse data. */
 static void
 input_parse(struct input_ctx *ictx, u_char *buf, size_t len)
@@ -1042,6 +1239,9 @@ input_parse_buffer(struct window_pane *wp, u_char *buf, size_t len)
 {
 	struct input_ctx	*ictx = wp->ictx;
 	struct screen_write_ctx	*sctx = &ictx->ctx;
+#ifdef _WIN32
+	u_char			*normalized = NULL;
+#endif
 
 	if (len == 0)
 		return;
@@ -1059,11 +1259,20 @@ input_parse_buffer(struct window_pane *wp, u_char *buf, size_t len)
 	else
 		screen_write_start(sctx, &wp->base);
 
+#ifdef _WIN32
+	normalized = input_normalize_conpty_wide_rewrite(ictx, buf, len, &len);
+	if (normalized != NULL)
+		buf = normalized;
+#endif
+
 	log_debug("%s: %%%u %s, %zu bytes: %.*s", __func__, wp->id,
 	    ictx->state->name, len, (int)len, buf);
 
 	input_parse(ictx, buf, len);
 	screen_write_stop(sctx);
+#ifdef _WIN32
+	free(normalized);
+#endif
 }
 
 /* Parse given input for screen. */

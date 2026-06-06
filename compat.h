@@ -20,6 +20,7 @@
 #ifdef _WIN32
 #include "win32/win32-platform.h"
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <wchar.h>
 #else
@@ -29,6 +30,7 @@
 
 #include <fnmatch.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <termios.h>
 #include <wchar.h>
@@ -61,6 +63,12 @@
 
 #ifdef HAVE_UTF8PROC
 #include <utf8proc.h>
+#endif
+
+#ifdef HAVE_UTF8PROC
+typedef int32_t utf8_wchar;
+#else
+typedef wchar_t utf8_wchar;
 #endif
 
 #ifndef __GNUC__
@@ -462,9 +470,9 @@ int		 systemd_move_to_new_cgroup(char **);
 
 #ifdef HAVE_UTF8PROC
 /* utf8proc.c */
-int		 utf8proc_wcwidth(wchar_t);
-int		 utf8proc_mbtowc(wchar_t *, const char *, size_t);
-int		 utf8proc_wctomb(char *, wchar_t);
+int		 utf8proc_wcwidth(utf8_wchar);
+int		 utf8proc_mbtowc(utf8_wchar *, const char *, size_t);
+int		 utf8proc_wctomb(char *, utf8_wchar);
 #endif
 
 #ifdef NEED_FUZZING

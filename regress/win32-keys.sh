@@ -164,6 +164,9 @@ $TMUX capture-pane -tkeys -p | tr -d '\r' | grep -q "BSPACE_OK" || {
 }
 echo "PASS 11: Backspace"
 
+# Unicode prompt-editing coverage lives in regress/win32-unicode.sh because
+# send-keys does not reliably inject non-ASCII text into Windows shells.
+
 # --- Test 12: Multiple modifier combinations (no crash) ---
 $TMUX send-keys -tkeys C-a C-e C-k
 sleep 0.5

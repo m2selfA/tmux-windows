@@ -28,7 +28,7 @@
 #include "tmux.h"
 
 struct utf8_width_item {
-	wchar_t				wc;
+	utf8_wchar			wc;
 	u_int				width;
 	int				allocated;
 
@@ -284,7 +284,7 @@ utf8_item_by_index(u_int index)
 
 /* Find a codepoint in the cache. */
 static struct utf8_width_item *
-utf8_find_in_width_cache(wchar_t wc)
+utf8_find_in_width_cache(utf8_wchar wc)
 {
 	struct utf8_width_item	uw;
 
@@ -301,7 +301,7 @@ utf8_add_to_width_cache(const char *s)
 	u_int			 width;
 	const char		*errstr;
 	struct utf8_data	*ud;
-	wchar_t			 wc;
+	utf8_wchar		 wc;
 	unsigned long long	 n;
 
 	copy = xstrdup(s);
@@ -323,7 +323,11 @@ utf8_add_to_width_cache(const char *s)
 		if (copy[2] == '\0' ||
 		    *endptr != '\0' ||
 		    n == 0 ||
+#ifdef HAVE_UTF8PROC
+		    n > 0x10ffff ||
+#else
 		    n > WCHAR_MAX ||
+#endif
 		    (errno == ERANGE && n == ULLONG_MAX)) {
 			free(copy);
 			return;
@@ -519,7 +523,7 @@ static enum utf8_state
 utf8_width(struct utf8_data *ud, int *width)
 {
 	struct utf8_width_item	*uw;
-	wchar_t			 wc;
+	utf8_wchar		 wc;
 
 	if (utf8_towc(ud, &wc) != UTF8_DONE)
 		return (UTF8_ERROR);
@@ -550,7 +554,7 @@ utf8_width(struct utf8_data *ud, int *width)
 
 /* Convert UTF-8 character to wide character. */
 enum utf8_state
-utf8_towc(const struct utf8_data *ud, wchar_t *wc)
+utf8_towc(const struct utf8_data *ud, utf8_wchar *wc)
 {
 #ifdef HAVE_UTF8PROC
 	switch (utf8proc_mbtowc(wc, ud->data, ud->size)) {
@@ -571,7 +575,7 @@ utf8_towc(const struct utf8_data *ud, wchar_t *wc)
 
 /* Convert wide character to UTF-8 character. */
 enum utf8_state
-utf8_fromwc(wchar_t wc, struct utf8_data *ud)
+utf8_fromwc(utf8_wchar wc, struct utf8_data *ud)
 {
 	int	size, width;
 

@@ -31,7 +31,7 @@ jobs:
       - name: Setup vcpkg and install dependencies
         shell: pwsh
         run: |
-          vcpkg install libevent:x64-windows-static
+          vcpkg install libevent:x64-windows-static utf8proc:x64-windows-static
 
       - name: Configure CMake
         shell: pwsh
@@ -103,6 +103,13 @@ jobs:
           sleep 2
           TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-control-client.sh
 
+      - name: Run native Unicode regression tests
+        shell: bash
+        run: |
+          taskkill //F //IM tmux.exe 2>/dev/null || true
+          sleep 2
+          TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-native-unicode.sh
+
       - name: Upload build artifacts
         if: success()
         uses: actions/upload-artifact@v4
@@ -138,7 +145,7 @@ jobs:
       - name: Setup vcpkg and install dependencies
         shell: pwsh
         run: |
-          vcpkg install libevent:x64-windows-static
+          vcpkg install libevent:x64-windows-static utf8proc:x64-windows-static
 
       - name: Configure CMake
         shell: pwsh

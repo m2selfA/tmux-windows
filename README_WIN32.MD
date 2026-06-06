@@ -150,8 +150,10 @@ The remaining ~45 files have 2-12 line changes each, primarily:
 
 ## Regression Tests
 
-CI runs 8 test scripts (230+ assertions). Windows-specific tests are in
-`regress/`. Run with:
+CI runs 9 test scripts (230+ assertions plus native Unicode console checks).
+Windows-specific tests are in `regress/`. An additional manual Unicode script,
+`win32-unicode.sh`, covers raw-VT rendering and shell spawnability outside the
+CI gate. Run with:
 
 ```bash
 TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-basic.sh
@@ -217,6 +219,19 @@ v-split, 4-pane, tiled, even-horizontal, even-vertical.
 Port of upstream control-client pane operations: splitw, selectp, killp,
 swapp, selectl tiled, killw — verifies server survives each operation.
 
+### win32-native-unicode.sh (2 tests)
+
+Windows-native PowerShell console regression for ConPTY wide-character rewrite
+behavior. Verifies that overwriting `你好` with one or two backspaces followed
+by `X` renders as `你X` rather than leaving a gap.
+
+### win32-unicode.sh (manual/raw-VT coverage)
+
+Git-Bash-driven Unicode coverage for combining marks, emoji modifier sequences,
+flag pairs, and intentional overwrite of a wide glyph with `" X"`. This script
+uses a spawnable `sh.exe` path so the assertions actually execute on Windows,
+but it is not the CI gate for native-console backspace behavior.
+
 Note: The tests use `OUT` instead of `TMP` for temp file variables to avoid
 shadowing the Windows `%TMP%` environment variable (which would cause
 `GetTempFileName()` to fail with ACCESS_DENIED in the server process).
@@ -247,10 +262,10 @@ so the server is only resident while sessions are active.
 ## Build System
 
 The project uses CMake with MSVC. Requires [vcpkg](https://vcpkg.io/) for
-libevent:
+libevent and utf8proc:
 
 ```powershell
-vcpkg install libevent:x64-windows-static
+vcpkg install libevent:x64-windows-static utf8proc:x64-windows-static
 cmake -S . -B build -G "Visual Studio 17 2022" `
   -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
   -DVCPKG_TARGET_TRIPLET=x64-windows-static
@@ -259,7 +274,9 @@ cmake --build build --config Release
 
 The resulting `tmux.exe` is a single statically-linked binary in
 `build/Release/`. For debug builds, use `--config Debug` (output in
-`build/Debug/`). Copy `tmux.exe` to a directory in `%PATH%`.
+`build/Debug/`). Copy `tmux.exe` to a directory in `%PATH%`. Unicode width
+handling uses `utf8proc` by default; pass `-DTMUX_ENABLE_UTF8PROC=OFF` if you
+need to fall back to the compatibility `wcwidth()` implementation.
 
 CI builds run automatically on every push via GitHub Actions
 (`.github/workflows/ci.yml`). Tagged releases (`v*`) produce downloadable

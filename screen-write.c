@@ -1995,6 +1995,8 @@ screen_write_collect_add(struct screen_write_ctx *ctx,
 {
 	struct screen			*s = ctx->s;
 	struct screen_write_citem	*ci;
+	struct grid_line		*gl;
+	struct grid_cell		 current;
 	u_int				 sx = screen_size_x(s);
 	int				 collect;
 
@@ -2017,6 +2019,16 @@ screen_write_collect_add(struct screen_write_ctx *ctx,
 		collect = 0;
 	else if (s->sel != NULL)
 		collect = 0;
+	else {
+		gl = grid_get_line(s->grid, s->grid->hsize + s->cy);
+		if (gl->flags & GRID_LINE_EXTENDED) {
+			grid_view_get_cell(s->grid, s->cx, s->cy, &current);
+			if (current.flags & GRID_FLAG_PADDING ||
+			    current.data.width != 1 ||
+			    current.data.size != 1)
+				collect = 0;
+		}
+	}
 	if (!collect) {
 		screen_write_collect_end(ctx);
 		screen_write_collect_flush(ctx, 0, __func__);
@@ -2245,7 +2257,7 @@ screen_write_combine(struct screen_write_ctx *ctx, const struct grid_cell *gc)
 			if (utf8_should_combine(&last.data, ud))
 				force_wide = 1;
 			else if (utf8_should_combine(ud, &last.data))
-                               force_wide = 1;
+				force_wide = 1;
 			else if (!utf8_has_zwj(&last.data))
 				return (0);
 			break;
