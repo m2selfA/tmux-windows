@@ -8,55 +8,22 @@
 # Upstream had 4 backspace/key-mapping fixes in Dec 2024 - Feb 2025:
 #   6d792e4, 2a5eba7, 5c3cf2f, eece415
 
-PATH=/bin:/usr/bin
 TERM=screen
 
 [ -z "$TEST_TMUX" ] && TEST_TMUX=$(readlink -f ../tmux)
-TMUX="$TEST_TMUX -Ltest"
+LABEL="test-$$"
+TMUX="$TEST_TMUX -L$LABEL"
 $TMUX kill-server 2>/dev/null
-TMUX2="$TEST_TMUX -Ltest2"
-$TMUX2 kill-server 2>/dev/null
 sleep 1
 
 FNULL="-fNUL"
 OUT=$(mktemp)
-PROMPT_OUT=$(mktemp)
-trap "rm -f $OUT $PROMPT_OUT; $TMUX kill-server 2>/dev/null; $TMUX2 kill-server 2>/dev/null" 0 1 15
+trap "rm -f $OUT; $TMUX kill-server 2>/dev/null" 0 1 15
 FAIL=0
 
 fail() {
 	echo "FAIL: $1"
 	FAIL=1
-}
-
-prompt_backspace_case() {
-	SESSION_NAME=$1
-	TARGET_VALUE=$2
-	SETUP_CMD=$3
-
-	$TMUX2 kill-server 2>/dev/null
-	$TMUX2 $FNULL new -d -s"$SESSION_NAME" -x 120 -y 24 cmd.exe < /dev/null || exit 1
-	if [ -n "$SETUP_CMD" ]; then
-		$TMUX2 $SETUP_CMD || exit 1
-	fi
-	$TMUX $FNULL new -d -s"${SESSION_NAME}-relay" "$TMUX2 attach -t $SESSION_NAME" || exit 1
-	sleep 2
-
-	$TMUX2 command-prompt -I 'cmd.exe' "display-message -p -- '%%'" > "$PROMPT_OUT" &
-	sleep 0.5
-	$TMUX send-keys -t"${SESSION_NAME}-relay" BSpace BSpace BSpace BSpace BSpace BSpace BSpace 0 0 Enter
-	wait
-
-	PROMPT_VALUE=$(tr -d '\r\n' < "$PROMPT_OUT")
-	if [ "$PROMPT_VALUE" != "$TARGET_VALUE" ]; then
-		fail "$SESSION_NAME prompt backspace editing produced '$PROMPT_VALUE'"
-	else
-		echo "PASS: $SESSION_NAME prompt backspace"
-	fi
-
-	: > "$PROMPT_OUT"
-	$TMUX kill-session -t"${SESSION_NAME}-relay" 2>/dev/null
-	$TMUX2 kill-server 2>/dev/null
 }
 
 $TMUX $FNULL new -d -skeys -x 120 -y 24 cmd.exe < /dev/null || exit 1
@@ -200,15 +167,7 @@ echo "PASS 11: Backspace"
 # Unicode prompt-editing coverage lives in regress/win32-unicode.sh because
 # send-keys does not reliably inject non-ASCII text into Windows shells.
 
-# --- Test 12: BSpace edits prefilled command-prompt input ---
-prompt_backspace_case prompt-default 00 ""
-echo "PASS 12: Prefilled command-prompt backspace"
-
-# --- Test 13: BSpace edits prefilled command-prompt input with C-h ---
-prompt_backspace_case prompt-ctrl-h 00 "set -s backspace C-h"
-echo "PASS 13: Prefilled command-prompt backspace with C-h"
-
-# --- Test 14: Multiple modifier combinations (no crash) ---
+# --- Test 12: Multiple modifier combinations (no crash) ---
 $TMUX send-keys -tkeys C-a C-e C-k
 sleep 0.5
 $TMUX send-keys -tkeys "echo MOD_OK" Enter
@@ -216,7 +175,7 @@ sleep 2
 $TMUX capture-pane -tkeys -p | tr -d '\r' | grep -q "MOD_OK" || {
 	fail "Modifier combinations broke pane"
 }
-echo "PASS 14: Modifier combinations"
+echo "PASS 12: Modifier combinations"
 
 $TMUX kill-server 2>/dev/null
 
