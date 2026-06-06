@@ -17,6 +17,7 @@ struct win32_pty {
 	HANDLE   hPipeOut;   /* Read end: output from PTY */
 	HANDLE   hProcess;   /* Child process handle */
 	HANDLE   hThread;    /* Child main thread handle */
+	HANDLE   process_thread; /* Waits for child exit and closes PTY pipes */
 	DWORD    dwProcessId;
 	SOCKET   sock;       /* Socket FD for libevent (read end of bridge) */
 	SOCKET   bridge_peer;/* Write end of bridge socket pair */
@@ -24,6 +25,37 @@ struct win32_pty {
 	HANDLE   input_thread;  /* Thread: bridge_peer -> hPipeIn (input) */
 	volatile int closing;
 };
+
+static void
+close_handle_once(HANDLE *handle)
+{
+	HANDLE h;
+
+	h = (HANDLE)InterlockedExchangePointer((PVOID volatile *)handle, NULL);
+	if (h != NULL && h != INVALID_HANDLE_VALUE)
+		CloseHandle(h);
+}
+
+static void
+close_pseudoconsole_once(HPCON *hpc)
+{
+	HPCON h;
+
+	h = (HPCON)InterlockedExchangePointer((PVOID volatile *)hpc, NULL);
+	if (h != NULL)
+		ClosePseudoConsole(h);
+}
+
+static void
+close_socket_once(SOCKET *sock)
+{
+	SOCKET s;
+
+	s = (SOCKET)(UINT_PTR)InterlockedExchangePointer(
+	    (PVOID volatile *)sock, (PVOID)(UINT_PTR)INVALID_SOCKET);
+	if (s != INVALID_SOCKET)
+		closesocket(s);
+}
 
 /* Output bridge: reads from ConPTY pipe, sends to socket (child -> server). */
 static DWORD WINAPI
@@ -44,8 +76,7 @@ pty_bridge_thread(LPVOID arg)
 	}
 
 	/* Signal EOF by closing the socket. */
-	closesocket(pty->bridge_peer);
-	pty->bridge_peer = INVALID_SOCKET;
+	close_socket_once(&pty->bridge_peer);
 	return 0;
 }
 
@@ -57,13 +88,51 @@ pty_input_thread(LPVOID arg)
 	char buf[4096];
 	int n;
 	DWORD written;
+	int saw_input = 0;
 
 	while (!pty->closing) {
 		n = recv(pty->bridge_peer, buf, sizeof buf, 0);
 		if (n <= 0)
 			break;
+		saw_input = 1;
 		if (!WriteFile(pty->hPipeIn, buf, (DWORD)n, &written, NULL))
 			break;
+	}
+	/*
+	 * ConPTY-backed shell helpers can fail during startup if stdin is
+	 * closed immediately before the child has finished attaching. Only
+	 * delay EOF for jobs that never received any input.
+	 */
+	if (!pty->closing && !saw_input)
+		Sleep(100);
+	close_handle_once(&pty->hPipeIn);
+	return 0;
+}
+
+static DWORD WINAPI
+pty_process_thread(LPVOID arg)
+{
+	struct win32_pty *pty = (struct win32_pty *)arg;
+	DWORD		 available = 0;
+	int		 tries;
+
+	if (pty->hProcess != NULL)
+		WaitForSingleObject(pty->hProcess, INFINITE);
+	if (!pty->closing) {
+		for (tries = 0; tries < 20; tries++) {
+			if (pty->hPipeOut == NULL ||
+			    !PeekNamedPipe(pty->hPipeOut, NULL, 0, NULL,
+			    &available, NULL) || available == 0)
+				break;
+			Sleep(10);
+		}
+		close_pseudoconsole_once(&pty->hPC);
+		close_handle_once(&pty->hPipeIn);
+		close_socket_once(&pty->bridge_peer);
+		if (pty->hPipeOut != NULL)
+			CancelIoEx(pty->hPipeOut, NULL);
+		if (pty->bridge_thread != NULL)
+			CancelSynchronousIo(pty->bridge_thread);
 	}
 	return 0;
 }
@@ -179,6 +248,10 @@ win32_pty_spawn(const char *cmd, const char *cwd, char *env,
 	pty->input_thread = CreateThread(NULL, 0, pty_input_thread, pty, 0, NULL);
 	if (pty->input_thread == NULL)
 		goto fail;
+	pty->process_thread = CreateThread(NULL, 0, pty_process_thread, pty, 0,
+	    NULL);
+	if (pty->process_thread == NULL)
+		goto fail;
 
 	if (out_pid != NULL)
 		*out_pid = (pid_t)pi.dwProcessId;
@@ -190,9 +263,10 @@ fail:
 	if (pipeIn_write) CloseHandle(pipeIn_write);
 	if (pipeOut_read) CloseHandle(pipeOut_read);
 	if (pipeOut_write) CloseHandle(pipeOut_write);
-	if (pty->hPC) ClosePseudoConsole(pty->hPC);
+	close_pseudoconsole_once(&pty->hPC);
 	if (pty->hProcess) CloseHandle(pty->hProcess);
 	if (pty->hThread) CloseHandle(pty->hThread);
+	if (pty->process_thread) CloseHandle(pty->process_thread);
 	if (pty->sock != INVALID_SOCKET) closesocket(pty->sock);
 	if (pty->bridge_peer != INVALID_SOCKET) closesocket(pty->bridge_peer);
 	free(pty);
@@ -222,12 +296,9 @@ win32_pty_close(struct win32_pty *pty)
 
 	pty->closing = 1;
 
-	if (pty->hPC != NULL)
-		ClosePseudoConsole(pty->hPC);
-	if (pty->hPipeIn != NULL)
-		CloseHandle(pty->hPipeIn);
-	if (pty->hPipeOut != NULL)
-		CloseHandle(pty->hPipeOut);
+	close_pseudoconsole_once(&pty->hPC);
+	close_handle_once(&pty->hPipeIn);
+	close_handle_once(&pty->hPipeOut);
 
 	/* Wait for bridge threads. */
 	if (pty->bridge_thread != NULL) {
@@ -237,6 +308,10 @@ win32_pty_close(struct win32_pty *pty)
 	if (pty->input_thread != NULL) {
 		WaitForSingleObject(pty->input_thread, 2000);
 		CloseHandle(pty->input_thread);
+	}
+	if (pty->process_thread != NULL) {
+		WaitForSingleObject(pty->process_thread, 2000);
+		CloseHandle(pty->process_thread);
 	}
 
 	if (pty->hProcess != NULL) {
@@ -248,8 +323,7 @@ win32_pty_close(struct win32_pty *pty)
 
 	if (pty->sock != INVALID_SOCKET)
 		closesocket(pty->sock);
-	if (pty->bridge_peer != INVALID_SOCKET)
-		closesocket(pty->bridge_peer);
+	close_socket_once(&pty->bridge_peer);
 
 	free(pty);
 }

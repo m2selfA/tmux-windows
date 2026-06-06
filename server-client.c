@@ -645,6 +645,7 @@ server_client_exec(struct client *c, const char *cmd)
 	struct session	*s = c->session;
 	char		*msg;
 	const char	*shell;
+	char		*resolved_shell = NULL;
 	size_t		 cmdsize, shellsize;
 
 	if (*cmd == '\0')
@@ -655,7 +656,10 @@ server_client_exec(struct client *c, const char *cmd)
 		shell = options_get_string(s->options, "default-shell");
 	else
 		shell = options_get_string(global_s_options, "default-shell");
-	if (!checkshell(shell))
+	resolved_shell = resolveshell(shell, NULL);
+	if (resolved_shell != NULL)
+		shell = resolved_shell;
+	else
 		shell = _PATH_BSHELL;
 	shellsize = strlen(shell) + 1;
 
@@ -665,6 +669,7 @@ server_client_exec(struct client *c, const char *cmd)
 
 	proc_send(c->peer, MSG_EXEC, -1, msg, cmdsize + shellsize);
 	free(msg);
+	free(resolved_shell);
 }
 
 static enum mouse_where
@@ -3906,11 +3911,16 @@ static int
 server_client_dispatch_shell(struct client *c)
 {
 	const char	*shell;
+	char		*resolved_shell = NULL;
 
 	shell = options_get_string(global_s_options, "default-shell");
-	if (!checkshell(shell))
+	resolved_shell = resolveshell(shell, NULL);
+	if (resolved_shell != NULL)
+		shell = resolved_shell;
+	else
 		shell = _PATH_BSHELL;
 	proc_send(c->peer, MSG_SHELL, -1, shell, strlen(shell) + 1);
+	free(resolved_shell);
 
 	proc_kill_peer(c->peer);
 	return (0);

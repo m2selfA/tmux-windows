@@ -29,6 +29,29 @@ static HANDLE watcher_thread = NULL;
 static HANDLE watcher_event = NULL; /* signaled when watch list changes */
 static volatile int watcher_shutdown = 0;
 
+static wchar_t *
+utf8_to_utf16(const char *value)
+{
+	wchar_t	*wide;
+	int	 len;
+
+	if (value == NULL)
+		return (NULL);
+
+	len = MultiByteToWideChar(CP_UTF8, 0, value, -1, NULL, 0);
+	if (len <= 0)
+		return (NULL);
+
+	wide = malloc((size_t)len * sizeof *wide);
+	if (wide == NULL)
+		return (NULL);
+	if (MultiByteToWideChar(CP_UTF8, 0, value, -1, wide, len) <= 0) {
+		free(wide);
+		return (NULL);
+	}
+	return (wide);
+}
+
 static DWORD WINAPI
 process_watcher_thread(LPVOID arg)
 {
@@ -178,7 +201,7 @@ win32_process_spawn(const char *cmd, const char *cwd, int outfd)
 	PROCESS_INFORMATION pi;
 	HANDLE hOut;
 	SECURITY_ATTRIBUTES sa;
-	char *cmddup;
+	char		*cmddup;
 
 	memset(&sa, 0, sizeof sa);
 	sa.nLength = sizeof sa;
@@ -215,6 +238,51 @@ win32_process_spawn(const char *cmd, const char *cwd, int outfd)
 	CloseHandle(pi.hProcess);
 
 	return ((pid_t)pi.dwProcessId);
+}
+
+int
+win32_process_exec(const char *cmd, const char *cwd)
+{
+	STARTUPINFOW	 si;
+	PROCESS_INFORMATION pi;
+	wchar_t		*wcmd = NULL, *wcwd = NULL;
+	DWORD		 status;
+
+	memset(&si, 0, sizeof si);
+	si.cb = sizeof si;
+	si.dwFlags = STARTF_USESTDHANDLES;
+	si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+	si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+	si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+	memset(&pi, 0, sizeof pi);
+
+	wcmd = utf8_to_utf16(cmd);
+	if (wcmd == NULL)
+		return (-1);
+	if (cwd != NULL && *cwd != '\0') {
+		wcwd = utf8_to_utf16(cwd);
+		if (wcwd == NULL) {
+			free(wcmd);
+			return (-1);
+		}
+	}
+
+	if (!CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, 0, NULL,
+	    (wcwd != NULL) ? wcwd : NULL, &si, &pi)) {
+		free(wcmd);
+		free(wcwd);
+		return (-1);
+	}
+	free(wcmd);
+	free(wcwd);
+
+	WaitForSingleObject(pi.hProcess, INFINITE);
+	if (!GetExitCodeProcess(pi.hProcess, &status))
+		status = 1;
+
+	CloseHandle(pi.hThread);
+	CloseHandle(pi.hProcess);
+	return ((int)status);
 }
 
 /*

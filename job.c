@@ -43,6 +43,9 @@
 static void	job_read_callback(struct bufferevent *, void *);
 static void	job_write_callback(struct bufferevent *, void *);
 static void	job_error_callback(struct bufferevent *, short, void *);
+#ifdef _WIN32
+static void	job_drain_output(struct job *);
+#endif
 
 /* A single job. */
 struct job {
@@ -61,6 +64,9 @@ struct job {
 
 	int			 fd;
 	struct bufferevent	*event;
+#ifdef _WIN32
+	struct win32_pty	*pty;
+#endif
 
 	job_update_cb		 updatecb;
 	job_complete_cb		 completecb;
@@ -83,10 +89,11 @@ job_run(const char *cmd, int argc, char **argv, struct environ *e,
 	struct job	 *job;
 	struct environ	 *env;
 	pid_t		  pid;
+	char		 *resolved_shell = NULL;
 #ifdef _WIN32
-	int		  out[2];
 	const char	 *shell;
-	char		 *cmdline, *argv0;
+	char		 *cmdline, *envblock;
+	enum shell_family shell_family = SHELL_FAMILY_CMD;
 	struct options	 *oo;
 	struct win32_pty *pty = NULL;
 #else
@@ -115,10 +122,17 @@ job_run(const char *cmd, int argc, char **argv, struct environ *e,
 		else
 			oo = global_s_options;
 		shell = options_get_string(oo, "default-shell");
-		if (!checkshell(shell))
+		resolved_shell = resolveshell(shell, &shell_family);
+		if (resolved_shell != NULL)
+			shell = resolved_shell;
+		else {
 			shell = _PATH_BSHELL;
+			shell_family = SHELL_FAMILY_CMD;
+		}
 	}
+#ifndef _WIN32
 	argv0 = shell_argv0(shell, 0);
+#endif
 
 	if (cmd == NULL) {
 		cmd_log_argv(argc, argv, "%s:", __func__);
@@ -130,34 +144,25 @@ job_run(const char *cmd, int argc, char **argv, struct environ *e,
 	}
 
 #ifdef _WIN32
-	/* Windows: use ConPTY for PTY jobs, pipes + CreateProcess otherwise. */
-	if (flags & JOB_PTY) {
-		if (cmd != NULL)
-			xasprintf(&cmdline, "%s /c %s", shell, cmd);
-		else
-			cmdline = cmd_stringify_argv(argc, argv);
-		pty = win32_pty_spawn(cmdline, cwd, NULL, sx, sy, &pid);
-		free(cmdline);
-		if (pty == NULL)
-			goto fail;
-	} else {
-		if (socketpair(AF_UNIX, SOCK_STREAM, PF_UNSPEC, out) != 0)
-			goto fail;
-		if (cmd != NULL)
-			xasprintf(&cmdline, "%s /c %s", shell, cmd);
-		else
-			cmdline = cmd_stringify_argv(argc, argv);
-		pid = win32_process_spawn(cmdline, cwd, out[1]);
-		free(cmdline);
-		if (pid == -1) {
-			close(out[0]);
-			close(out[1]);
-			goto fail;
-		}
-	}
+	/* Windows: route all jobs through ConPTY so stdio is bridged reliably. */
+	if (cmd != NULL)
+		cmdline = win32_build_shell_command(shell, shell_family, cmd);
+	else
+		cmdline = win32_build_command_line(argc, argv);
+	envblock = environ_to_win32_block(env);
+	pty = win32_pty_spawn(cmdline, cwd, envblock,
+	    sx > 0 ? sx : 80, sy > 0 ? sy : 24, &pid);
+	free(envblock);
+	free(cmdline);
+	if (pty == NULL)
+		goto fail;
+	win32_process_watch(win32_pty_get_process(pty), pid);
 
 	environ_free(env);
+#ifndef _WIN32
 	free(argv0);
+#endif
+	free(resolved_shell);
 
 	job = xcalloc(1, sizeof *job);
 	job->state = JOB_RUNNING;
@@ -177,12 +182,9 @@ job_run(const char *cmd, int argc, char **argv, struct environ *e,
 	job->freecb = freecb;
 	job->data = data;
 
-	if (flags & JOB_PTY)
-		job->fd = win32_pty_get_fd(pty);
-	else {
-		close(out[1]);
-		job->fd = out[0];
-	}
+	job->fd = win32_pty_get_fd(pty);
+	job->pty = pty;
+	strlcpy(job->tty, "conpty", sizeof job->tty);
 	setblocking(job->fd, 0);
 #else
 	sigfillset(&set);
@@ -308,13 +310,20 @@ fail:
 	sigprocmask(SIG_SETMASK, &oldset, NULL);
 #endif
 	environ_free(env);
+#ifndef _WIN32
 	free(argv0);
+#endif
+	free(resolved_shell);
 	return (NULL);
 }
 
 /* Take job's file descriptor and free the job. */
 int
-job_transfer(struct job *job, pid_t *pid, char *tty, size_t ttylen)
+job_transfer(struct job *job, pid_t *pid, char *tty, size_t ttylen
+#ifdef _WIN32
+    , void **ptyp
+#endif
+)
 {
 	int	fd = job->fd;
 
@@ -324,6 +333,11 @@ job_transfer(struct job *job, pid_t *pid, char *tty, size_t ttylen)
 		*pid = job->pid;
 	if (tty != NULL)
 		strlcpy(tty, job->tty, ttylen);
+#ifdef _WIN32
+	if (ptyp != NULL)
+		*ptyp = job->pty;
+	job->pty = NULL;
+#endif
 
 	LIST_REMOVE(job, entry);
 	free(job->cmd);
@@ -354,6 +368,13 @@ job_free(struct job *job)
 		kill(job->pid, SIGTERM);
 	if (job->event != NULL)
 		bufferevent_free(job->event);
+#ifdef _WIN32
+	if (job->pty != NULL) {
+		win32_pty_close(job->pty);
+		job->pty = NULL;
+		job->fd = -1;
+	} else
+#endif
 	if (job->fd != -1)
 		close(job->fd);
 
@@ -374,12 +395,8 @@ job_resize(struct job *job, u_int sx, u_int sy)
 	log_debug("resize job %p: %ux%u", job, sx, sy);
 
 #ifdef _WIN32
-	/*
-	 * On Windows, PTY resize is handled via ConPTY at the window pane
-	 * level (window.c calls win32_pty_resize). Job-level PTY resize
-	 * is not yet implemented.
-	 */
-	log_debug("job_resize: not implemented on Windows");
+	if (job->pty != NULL)
+		win32_pty_resize(job->pty, (int)sx, (int)sy);
 #else
 	memset(&ws, 0, sizeof ws);
 	ws.ws_col = sx;
@@ -459,6 +476,17 @@ job_check_died(pid_t pid, int status)
 	log_debug("job died %p: %s, pid %ld", job, job->cmd, (long) job->pid);
 
 	job->status = status;
+#ifdef _WIN32
+	job->pid = -1;
+	job_drain_output(job);
+	if (job->updatecb != NULL &&
+	    EVBUFFER_LENGTH(EVBUFFER_INPUT(job->event)) != 0)
+		job->updatecb(job);
+	if (job->completecb != NULL)
+		job->completecb(job);
+	job_free(job);
+	return;
+#endif
 
 	if (job->state == JOB_CLOSED) {
 		if (job->completecb != NULL)
@@ -469,6 +497,39 @@ job_check_died(pid_t pid, int status)
 		job->state = JOB_DEAD;
 	}
 }
+
+#ifdef _WIN32
+static void
+job_drain_output(struct job *job)
+{
+	char	 buf[4096];
+	u_long	 available = 0;
+	int	 tries, n;
+
+	if (job->event == NULL || job->fd == -1)
+		return;
+
+	bufferevent_disable(job->event, EV_READ|EV_WRITE);
+	for (tries = 0; tries < 100; tries++) {
+		if (ioctlsocket((SOCKET)job->fd, FIONREAD, &available) != 0)
+			break;
+		if (available == 0) {
+			Sleep(10);
+			continue;
+		}
+		while (available != 0) {
+			n = recv((SOCKET)job->fd, buf,
+			    (int)(available > sizeof buf ? sizeof buf : available),
+			    0);
+			if (n <= 0)
+				return;
+			evbuffer_add(EVBUFFER_INPUT(job->event), buf, n);
+			if (ioctlsocket((SOCKET)job->fd, FIONREAD, &available) != 0)
+				return;
+		}
+	}
+}
+#endif
 
 /* Get job status. */
 int

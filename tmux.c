@@ -59,6 +59,13 @@ static char		*make_label(const char *, char **);
 
 static int		 areshell(const char *);
 static const char	*getshell(void);
+#ifdef _WIN32
+static const char	*shell_basename(const char *);
+static int		 shell_family_from_name(const char *,
+			    enum shell_family *);
+static char		*win32_quote_argument(const char *);
+static const char	*win32_shell_command_flag(enum shell_family);
+#endif
 
 static __dead void
 usage(int status)
@@ -70,18 +77,328 @@ usage(int status)
 	exit(status);
 }
 
+char *
+resolveshell(const char *shell, enum shell_family *family)
+{
+	char	*resolved;
+#ifdef _WIN32
+	size_t	 i;
+	enum shell_family	 resolved_family;
+#endif
+
+	if (shell == NULL || *shell == '\0')
+		return (NULL);
+#ifdef _WIN32
+	resolved_family = SHELL_FAMILY_CMD;
+	if (shell[0] == '/' && shell[1] != '/') {
+		log_debug("ignoring Unix shell path \"%s\" on Windows", shell);
+		return (NULL);
+	}
+	resolved = xstrdup(shell);
+
+	/* Strip MSYS2 backslash-escape: C\:/foo -> C:/foo. */
+	if (strlen(resolved) > 2 && resolved[1] == '\\' && resolved[2] == ':')
+		memmove(resolved + 1, resolved + 2, strlen(resolved + 2) + 1);
+
+	for (i = 0; resolved[i] != '\0'; i++) {
+		if (resolved[i] == '/')
+			resolved[i] = '\\';
+	}
+	if (!shell_family_from_name(shell_basename(resolved), &resolved_family)) {
+		free(resolved);
+		return (NULL);
+	}
+#else
+	if (*shell != '/')
+		return (NULL);
+	resolved = xstrdup(shell);
+#endif
+	if (areshell(resolved)) {
+		free(resolved);
+		return (NULL);
+	}
+	if (access(resolved, X_OK) != 0) {
+		free(resolved);
+		return (NULL);
+	}
+#ifdef _WIN32
+	if (family != NULL)
+		*family = resolved_family;
+#else
+	(void)family;
+#endif
+	return (resolved);
+}
+
+#ifdef _WIN32
+char *
+environ_to_win32_block(struct environ *env)
+{
+	struct environ_entry	*ee;
+	size_t			 total = 0;
+	wchar_t			*block, *p;
+	int			 nlen, vlen;
+
+	for (ee = environ_first(env); ee != NULL; ee = environ_next(ee)) {
+		if (ee->value == NULL || *ee->name == '\0')
+			continue;
+		nlen = MultiByteToWideChar(CP_UTF8, 0, ee->name, -1, NULL, 0);
+		vlen = MultiByteToWideChar(CP_UTF8, 0, ee->value, -1, NULL, 0);
+		total += (nlen - 1) + 1 + vlen;
+	}
+	total += 1;
+
+	block = xcalloc(total, sizeof *block);
+	p = block;
+	for (ee = environ_first(env); ee != NULL; ee = environ_next(ee)) {
+		if (ee->value == NULL || *ee->name == '\0')
+			continue;
+		nlen = MultiByteToWideChar(CP_UTF8, 0, ee->name, -1, p,
+		    (int)(total - (p - block)));
+		p += nlen - 1;
+		*p++ = L'=';
+		vlen = MultiByteToWideChar(CP_UTF8, 0, ee->value, -1, p,
+		    (int)(total - (p - block)));
+		p += vlen;
+	}
+	*p = L'\0';
+
+	return ((char *)block);
+}
+
+char *
+win32_build_command_line(int argc, char **argv)
+{
+	char	**quoted, *cmdline, *arg;
+	size_t	  len;
+	int	  i;
+
+	if (argc == 0)
+		return (xstrdup(""));
+
+	quoted = xcalloc(argc, sizeof *quoted);
+	len = 1;
+	for (i = 0; i < argc; i++) {
+		arg = argv[i];
+		if (arg == NULL)
+			arg = "";
+		quoted[i] = win32_quote_argument(arg);
+		len += strlen(quoted[i]) + 1;
+	}
+
+	cmdline = xmalloc(len);
+	*cmdline = '\0';
+	for (i = 0; i < argc; i++) {
+		if (i != 0)
+			strlcat(cmdline, " ", len);
+		strlcat(cmdline, quoted[i], len);
+		free(quoted[i]);
+	}
+	free(quoted);
+
+	return (cmdline);
+}
+
+char *
+win32_build_shell_command(const char *shell, enum shell_family family,
+    const char *command)
+{
+	const char	*flag = win32_shell_command_flag(family);
+	char		*quoted_shell, *quoted_command, *cmdline;
+
+	quoted_shell = win32_quote_argument(shell);
+	quoted_command = win32_quote_argument(command);
+	xasprintf(&cmdline, "%s %s %s", quoted_shell, flag, quoted_command);
+	free(quoted_shell);
+	free(quoted_command);
+	return (cmdline);
+}
+
+char *
+win32_strip_control_sequences(const char *input)
+{
+	size_t		 len, i, outlen = 0;
+	char		*output;
+
+	if (input == NULL)
+		return (xstrdup(""));
+
+	len = strlen(input);
+	output = xmalloc(len + 1);
+	for (i = 0; i < len; i++) {
+		if ((unsigned char)input[i] != '\033') {
+			output[outlen++] = input[i];
+			continue;
+		}
+		i++;
+		if (i >= len)
+			break;
+		if (input[i] == '[') {
+			i++;
+			while (i < len &&
+			    ((unsigned char)input[i] < 0x40 ||
+			    (unsigned char)input[i] > 0x7e))
+				i++;
+		} else if (input[i] == ']') {
+			i++;
+			while (i < len) {
+				if (input[i] == '\a')
+					break;
+				if (input[i] == '\033' && i + 1 < len &&
+				    input[i + 1] == '\\') {
+					i++;
+					break;
+				}
+				i++;
+			}
+		}
+	}
+	output[outlen] = '\0';
+	return (output);
+}
+
+static const char *
+shell_basename(const char *shell)
+{
+	const char	*slash, *name;
+
+	slash = strrchr(shell, '/');
+	name = strrchr(shell, '\\');
+	if (name != NULL && (slash == NULL || name > slash))
+		slash = name;
+	if (slash != NULL && slash[1] != '\0')
+		return (slash + 1);
+	return (shell);
+}
+
+static int
+shell_family_from_name(const char *name, enum shell_family *family)
+{
+	if (strcasecmp(name, "cmd") == 0 ||
+	    strcasecmp(name, "cmd.exe") == 0 ||
+	    strcasecmp(name, "command.com") == 0) {
+		*family = SHELL_FAMILY_CMD;
+		return (1);
+	}
+	if (strcasecmp(name, "powershell") == 0 ||
+	    strcasecmp(name, "powershell.exe") == 0 ||
+	    strcasecmp(name, "pwsh") == 0 ||
+	    strcasecmp(name, "pwsh.exe") == 0) {
+		*family = SHELL_FAMILY_POWERSHELL;
+		return (1);
+	}
+	if (strcasecmp(name, "sh") == 0 ||
+	    strcasecmp(name, "sh.exe") == 0 ||
+	    strcasecmp(name, "ash") == 0 ||
+	    strcasecmp(name, "ash.exe") == 0 ||
+	    strcasecmp(name, "bash") == 0 ||
+	    strcasecmp(name, "bash.exe") == 0 ||
+	    strcasecmp(name, "dash") == 0 ||
+	    strcasecmp(name, "dash.exe") == 0 ||
+	    strcasecmp(name, "ksh") == 0 ||
+	    strcasecmp(name, "ksh.exe") == 0 ||
+	    strcasecmp(name, "mksh") == 0 ||
+	    strcasecmp(name, "mksh.exe") == 0 ||
+	    strcasecmp(name, "pdksh") == 0 ||
+	    strcasecmp(name, "pdksh.exe") == 0 ||
+	    strcasecmp(name, "zsh") == 0 ||
+	    strcasecmp(name, "zsh.exe") == 0) {
+		*family = SHELL_FAMILY_POSIX;
+		return (1);
+	}
+	return (0);
+}
+
+static char *
+win32_quote_argument(const char *arg)
+{
+	size_t		 backslashes, len;
+	const char	*s;
+	char		*quoted, *out;
+	int		 need_quotes;
+
+	need_quotes = (*arg == '\0');
+	for (s = arg; *s != '\0'; s++) {
+		if (*s == ' ' || *s == '\t' || *s == '"') {
+			need_quotes = 1;
+			break;
+		}
+	}
+	if (!need_quotes)
+		return (xstrdup(arg));
+
+	len = strlen(arg) * 2 + 3;
+	quoted = xmalloc(len);
+	out = quoted;
+	*out++ = '"';
+
+	backslashes = 0;
+	for (s = arg; *s != '\0'; s++) {
+		if (*s == '\\') {
+			backslashes++;
+			continue;
+		}
+		if (*s == '"') {
+			while (backslashes != 0) {
+				*out++ = '\\';
+				*out++ = '\\';
+				backslashes--;
+			}
+			*out++ = '\\';
+			*out++ = '"';
+			backslashes = 0;
+			continue;
+		}
+		while (backslashes != 0) {
+			*out++ = '\\';
+			backslashes--;
+		}
+		backslashes = 0;
+		*out++ = *s;
+	}
+	while (backslashes != 0) {
+		*out++ = '\\';
+		*out++ = '\\';
+		backslashes--;
+	}
+	*out++ = '"';
+	*out = '\0';
+
+	return (quoted);
+}
+
+static const char *
+win32_shell_command_flag(enum shell_family family)
+{
+	switch (family) {
+	case SHELL_FAMILY_POWERSHELL:
+		return ("-Command");
+	case SHELL_FAMILY_POSIX:
+		return ("-c");
+	case SHELL_FAMILY_CMD:
+	default:
+		return ("/c");
+	}
+}
+#endif
+
 static const char *
 getshell(void)
 {
 #ifdef _WIN32
 	const char	*shell;
+	char		*resolved;
 
 	shell = getenv("SHELL");
-	if (shell != NULL && *shell != '\0')
+	if ((resolved = resolveshell(shell, NULL)) != NULL) {
+		free(resolved);
 		return (shell);
+	}
 	shell = getenv("COMSPEC");
-	if (shell != NULL && *shell != '\0')
+	if ((resolved = resolveshell(shell, NULL)) != NULL) {
+		free(resolved);
 		return (shell);
+	}
 	return (_PATH_BSHELL);
 #else
 	struct passwd	*pw;
@@ -102,21 +419,12 @@ getshell(void)
 int
 checkshell(const char *shell)
 {
-	if (shell == NULL || *shell == '\0')
+	char	*resolved;
+
+	resolved = resolveshell(shell, NULL);
+	if (resolved == NULL)
 		return (0);
-#ifdef _WIN32
-	if (*shell == '/') {
-		log_debug("ignoring Unix shell path \"%s\" on Windows", shell);
-		return (0);
-	}
-#else
-	if (*shell != '/')
-		return (0);
-#endif
-	if (areshell(shell))
-		return (0);
-	if (access(shell, X_OK) != 0)
-		return (0);
+	free(resolved);
 	return (1);
 }
 

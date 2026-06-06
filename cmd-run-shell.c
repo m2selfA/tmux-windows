@@ -239,6 +239,12 @@ cmd_run_shell_callback(struct job *job)
 	do {
 		line = evbuffer_readln(event->input, NULL, EVBUFFER_EOL_LF);
 		if (line != NULL) {
+#ifdef _WIN32
+			char	*clean = win32_strip_control_sequences(line);
+
+			free(line);
+			line = clean;
+#endif
 			cmd_run_shell_print(job, line);
 			free(line);
 		}
@@ -249,6 +255,14 @@ cmd_run_shell_callback(struct job *job)
 		line = xmalloc(size + 1);
 		memcpy(line, EVBUFFER_DATA(event->input), size);
 		line[size] = '\0';
+#ifdef _WIN32
+		{
+			char	*clean = win32_strip_control_sequences(line);
+
+			free(line);
+			line = clean;
+		}
+#endif
 
 		cmd_run_shell_print(job, line);
 

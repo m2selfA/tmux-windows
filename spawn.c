@@ -30,53 +30,6 @@
 
 #include "tmux.h"
 
-#ifdef _WIN32
-/*
- * Build a Windows Unicode environment block from a tmux environ struct.
- * The block format is: L"KEY=VALUE\0KEY=VALUE\0\0" (wide strings).
- * Returns an allocated block suitable for CreateProcessW with
- * CREATE_UNICODE_ENVIRONMENT, or NULL on failure. Caller must free().
- */
-static char *
-environ_to_win32_block(struct environ *env)
-{
-	struct environ_entry	*ee;
-	size_t			 total = 0;
-	wchar_t			*block, *p;
-	int			 nlen, vlen;
-
-	/* First pass: calculate total wchar_t count needed. */
-	for (ee = environ_first(env); ee != NULL; ee = environ_next(ee)) {
-		if (ee->value == NULL || *ee->name == '\0')
-			continue;
-		nlen = MultiByteToWideChar(CP_UTF8, 0, ee->name, -1, NULL, 0);
-		vlen = MultiByteToWideChar(CP_UTF8, 0, ee->value, -1, NULL, 0);
-		/* name (without NUL) + '=' + value (with NUL as separator) */
-		total += (nlen - 1) + 1 + vlen;
-	}
-	total += 1; /* final NUL terminator */
-
-	block = xcalloc(total, sizeof(wchar_t));
-	p = block;
-
-	/* Second pass: build the block. */
-	for (ee = environ_first(env); ee != NULL; ee = environ_next(ee)) {
-		if (ee->value == NULL || *ee->name == '\0')
-			continue;
-		nlen = MultiByteToWideChar(CP_UTF8, 0, ee->name, -1, p,
-		    (int)(total - (p - block)));
-		p += nlen - 1; /* advance past name, overwrite NUL */
-		*p++ = L'=';
-		vlen = MultiByteToWideChar(CP_UTF8, 0, ee->value, -1, p,
-		    (int)(total - (p - block)));
-		p += vlen; /* advance past value including its NUL separator */
-	}
-	*p = L'\0'; /* final double-NUL terminator */
-
-	return ((char *)block);
-}
-#endif
-
 /*
  * Set up the environment and create a new window and pane or a new pane.
  *
@@ -262,6 +215,10 @@ spawn_pane(struct spawn_context *sc, char **cause)
 	struct environ		 *child;
 	struct environ_entry	 *ee;
 	char			**argv, *cp, **argvp, *argv0, *cwd, *new_cwd;
+	char			 *resolved_shell = NULL;
+#ifdef _WIN32
+	enum shell_family	  shell_family = SHELL_FAMILY_CMD;
+#endif
 	char			  path[PATH_MAX];
 	const char		 *cmd, *tmp, *home = find_home();
 	const char		 *actual_cwd = NULL;
@@ -382,10 +339,26 @@ spawn_pane(struct spawn_context *sc, char **cause)
 	/* Then the shell. If respawning, use the old one. */
 	if (~sc->flags & SPAWN_RESPAWN) {
 		tmp = options_get_string(s->options, "default-shell");
-		if (!checkshell(tmp))
-			tmp = _PATH_BSHELL;
 		free(new_wp->shell);
-		new_wp->shell = xstrdup(tmp);
+		resolved_shell = resolveshell(tmp, &shell_family);
+		if (resolved_shell != NULL) {
+			new_wp->shell = resolved_shell;
+			resolved_shell = NULL;
+		} else {
+			new_wp->shell = xstrdup(_PATH_BSHELL);
+			shell_family = SHELL_FAMILY_CMD;
+		}
+	} else {
+		resolved_shell = resolveshell(new_wp->shell, &shell_family);
+		if (resolved_shell != NULL) {
+			free(new_wp->shell);
+			new_wp->shell = resolved_shell;
+			resolved_shell = NULL;
+		} else {
+			free(new_wp->shell);
+			new_wp->shell = xstrdup(_PATH_BSHELL);
+			shell_family = SHELL_FAMILY_CMD;
+		}
 	}
 	environ_set(child, "SHELL", 0, "%s", new_wp->shell);
 
@@ -430,25 +403,18 @@ spawn_pane(struct spawn_context *sc, char **cause)
 		struct win32_pty	*pty;
 		char			*cmdline, *envblock;
 		const char		*shell = new_wp->shell;
+		char			*shell_argv[1];
 
 		if (new_wp->argc == 1) {
-			xasprintf(&cmdline, "\"%s\" /c %s", shell,
+			cmdline = win32_build_shell_command(shell, shell_family,
 			    new_wp->argv[0]);
 		} else if (new_wp->argc > 1) {
-			int i;
-			size_t total = 0;
-			for (i = 0; i < new_wp->argc; i++)
-				total += strlen(new_wp->argv[i]) + 1;
-			cmdline = xmalloc(total + 1);
-			*cmdline = '\0';
-			for (i = 0; i < new_wp->argc; i++) {
-				if (i > 0)
-					strlcat(cmdline, " ", total + 1);
-				strlcat(cmdline, new_wp->argv[i], total + 1);
-			}
+			cmdline = win32_build_command_line(new_wp->argc,
+			    new_wp->argv);
 		} else {
 			/* Login shell. */
-			xasprintf(&cmdline, "\"%s\"", shell);
+			shell_argv[0] = (char *)shell;
+			cmdline = win32_build_command_line(1, shell_argv);
 		}
 
 		envblock = environ_to_win32_block(child);

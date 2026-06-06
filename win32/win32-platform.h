@@ -889,6 +889,7 @@ void  win32_process_unwatch(pid_t pid);
 void  win32_process_init(void);
 void  win32_process_cleanup(void);
 pid_t win32_process_spawn(const char *cmd, const char *cwd, int outfd);
+int   win32_process_exec(const char *cmd, const char *cwd);
 void  win32_launch_server(const char *label);
 
 /* win32-ipc.c */

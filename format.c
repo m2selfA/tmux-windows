@@ -310,6 +310,14 @@ format_job_update(struct job *job)
 	}
 	if (line == NULL)
 		return;
+#ifdef _WIN32
+	{
+		char	*clean = win32_strip_control_sequences(line);
+
+		free(line);
+		line = clean;
+	}
+#endif
 	fj->updated = 1;
 
 	free(fj->out);
@@ -345,6 +353,14 @@ format_job_complete(struct job *job)
 		buf[len] = '\0';
 	} else
 		buf = line;
+#ifdef _WIN32
+	{
+		char	*clean = win32_strip_control_sequences(buf);
+
+		free(buf);
+		buf = clean;
+	}
+#endif
 
 	log_debug("%s: %p %s: %s", __func__, fj, fj->cmd, buf);
 

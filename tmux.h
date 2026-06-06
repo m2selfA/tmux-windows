@@ -2322,6 +2322,20 @@ extern const char	*socket_path;
 extern const char	*shell_command;
 extern int		 ptm_fd;
 extern const char	*shell_command;
+enum shell_family {
+	SHELL_FAMILY_CMD,
+	SHELL_FAMILY_POWERSHELL,
+	SHELL_FAMILY_POSIX
+};
+
+char		*resolveshell(const char *, enum shell_family *);
+#ifdef _WIN32
+char		*win32_build_command_line(int, char **);
+char		*win32_build_shell_command(const char *, enum shell_family,
+		    const char *);
+char		*environ_to_win32_block(struct environ *);
+char		*win32_strip_control_sequences(const char *);
+#endif
 int		 checkshell(const char *);
 void		 setblocking(int, int);
 char 		*shell_argv0(const char *, int);
@@ -2550,7 +2564,11 @@ struct job	*job_run(const char *, int, char **, struct environ *,
 		     struct session *, const char *, job_update_cb,
 		     job_complete_cb, job_free_cb, void *, int, int, int);
 void		 job_free(struct job *);
+#ifdef _WIN32
+int		 job_transfer(struct job *, pid_t *, char *, size_t, void **);
+#else
 int		 job_transfer(struct job *, pid_t *, char *, size_t);
+#endif
 void		 job_resize(struct job *, u_int, u_int);
 void		 job_check_died(pid_t, int);
 int		 job_get_status(struct job *);

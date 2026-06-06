@@ -426,7 +426,7 @@ popup_make_pane(struct popup_data *pd, enum layout_type type)
 
 	if (pd->job != NULL) {
 		new_wp->fd = job_transfer(pd->job, &new_wp->pid, new_wp->tty,
-		    sizeof new_wp->tty);
+		    sizeof new_wp->tty, &new_wp->win32_pty);
 		pd->job = NULL;
 	}
 
@@ -437,9 +437,9 @@ popup_make_pane(struct popup_data *pd, enum layout_type type)
 	screen_init(&pd->s, 1, 1, 0);
 
 	shell = options_get_string(s->options, "default-shell");
-	if (!checkshell(shell))
-		shell = _PATH_BSHELL;
-	new_wp->shell = xstrdup(shell);
+	new_wp->shell = resolveshell(shell, NULL);
+	if (new_wp->shell == NULL)
+		new_wp->shell = xstrdup(_PATH_BSHELL);
 
 	window_pane_set_event(new_wp);
 	window_set_active_pane(w, new_wp, 1);

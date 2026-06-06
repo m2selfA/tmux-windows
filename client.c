@@ -629,14 +629,26 @@ static __dead void
 client_exec(const char *shell, const char *shellcmd)
 {
 #ifdef _WIN32
-	char cmd[32768];
+	char			*resolved_shell = NULL, *cmdline;
+	enum shell_family	 shell_family = SHELL_FAMILY_CMD;
+	int			 status;
 
 	log_debug("shell %s, command %s", shell, shellcmd);
 	proc_clear_signals(client_proc, 1);
 
-	snprintf(cmd, sizeof cmd, "\"%s\" /c %s", shell, shellcmd);
-	system(cmd);
-	exit(0);
+	resolved_shell = resolveshell(shell, &shell_family);
+	if (resolved_shell != NULL)
+		shell = resolved_shell;
+	else
+		shell = _PATH_BSHELL;
+
+	cmdline = win32_build_shell_command(shell, shell_family, shellcmd);
+	status = win32_process_exec(cmdline, NULL);
+	free(cmdline);
+	free(resolved_shell);
+	if (status < 0)
+		status = 1;
+	exit(status);
 #else
 	char	*argv0;
 

@@ -451,11 +451,17 @@ cmd_display_popup_exec(struct cmd *self, struct cmdq_item *item)
 		} else if (count == 1)
 			shellcmd = args_string(args, 0);
 		if (count <= 1 && (shellcmd == NULL || *shellcmd == '\0')) {
+			char	*resolved_shell;
+
 			shellcmd = NULL;
 			shell = options_get_string(s->options, "default-shell");
-			if (!checkshell(shell))
+			resolved_shell = resolveshell(shell, NULL);
+			if (resolved_shell != NULL)
+				shell = resolved_shell;
+			else
 				shell = _PATH_BSHELL;
 			cmd_append_argv(&argc, &argv, shell);
+			free(resolved_shell);
 		} else
 			args_to_vector(args, &argc, &argv);
 

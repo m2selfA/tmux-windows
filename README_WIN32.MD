@@ -96,26 +96,37 @@ cross-platform differences are handled automatically:
 | `-f /dev/null` | Opens `/dev/null` | Translated to `NUL` automatically |
 | `-S /path/to/sock` | Unix domain socket file | Basename extracted as IPC label (warning emitted) |
 | `-L name` | Socket label in `/tmp/tmux-$UID/` | IPC label in `%LOCALAPPDATA%\tmux\` |
-| `default-shell` | Must start with `/` | Unix paths (starting with `/`) rejected with fallback to `cmd.exe` |
-| `$SHELL` | Required to start with `/` | Falls back to `$COMSPEC` then `cmd.exe` |
+| `default-shell` | Must start with `/` | Unix paths (starting with `/`) rejected with fallback to `cmd.exe`; explicit Windows `cmd.exe`, PowerShell, `pwsh`, and POSIX shell paths such as Git Bash are normalized lazily before spawn |
+| `$SHELL` | Required to start with `/` | If it points at a supported Windows shell executable, it seeds `default-shell`; otherwise tmux falls back to `$COMSPEC` then `cmd.exe` |
 | `$TMUX_TMPDIR` | Controls socket directory | Not used (IPC directory is `%LOCALAPPDATA%\tmux\`) |
 | `~/.tmux.conf` | `~` = `$HOME` or pw_dir | `~` = `$USERPROFILE` or `$HOME` or `C:\` |
 | `-u` (UTF-8) | Opt-in | Auto-enabled on Windows |
+
+### Shell Families on Windows
+
+- Interactive panes, popups, `default-command`, one-argument `new-window`,
+  and `tmux -c` honor the selected shell family and choose `/c`,
+  `-Command`, or `-c` automatically.
+- Helper jobs (`if-shell`, `run-shell`, `#()`, `copy-pipe`) stay on
+  `_PATH_BSHELL` (`cmd.exe`) semantics so existing cmd-style snippets keep
+  working even when `default-shell` is PowerShell or Bash.
+- Unsupported executables such as `notepad.exe` are rejected as
+  `default-shell` values.
 
 ## New Files (win32/)
 
 | File | Lines | Purpose |
 |------|------:|---------|
-| `win32-platform.h` | 1,081 | POSIX type mappings, constants, signal stubs, struct termios/winsize, function declarations |
-| `win32-compat.c` | 821 | POSIX shims: flock, clock_gettime, socketpair, waitpid, kill, wcwidth, fnmatch, tparm (with full conditional support), etc. |
-| `win32-ipc.c` | 462 | Named pipe discovery + nonce auth replacing Unix domain sockets, with TCP data path and tty channel support |
-| `win32-regex.c` | 429 | Simple POSIX ERE regex engine (character classes, quantifiers, anchors, alternation) |
-| `win32-regex.h` | 51 | POSIX regex interface header |
-| `win32-pty.c` | 286 | ConPTY wrapper: pseudo-console creation, process spawn, bidirectional bridge threads |
-| `win32-process.c` | 284 | Process watcher thread, `win32_launch_server()` (with job object breakaway for SSH survival), child spawn helpers |
-| `win32-terminfo.c` | 213 | Hardcoded xterm-256color terminal capability table (170+ entries) |
-| `win32-signal.c` | 157 | Signal emulation via console events, resize polling, self-pipe delivery |
-| `win32-tty.c` | 98 | Console mode management: raw VT mode, size queries, UTF-8 code page |
+| `win32-platform.h` | 971 | POSIX type mappings, constants, signal stubs, struct termios/winsize, function declarations |
+| `win32-compat.c` | 720 | POSIX shims: flock, clock_gettime, socketpair, waitpid, kill, wcwidth, fnmatch, tparm (with full conditional support), etc. |
+| `win32-ipc.c` | 544 | Named pipe discovery + nonce auth replacing Unix domain sockets, with TCP data path and tty channel support |
+| `win32-regex.c` | 387 | Simple POSIX ERE regex engine (character classes, quantifiers, anchors, alternation) |
+| `win32-regex.h` | 41 | POSIX regex interface header |
+| `win32-pty.c` | 312 | ConPTY wrapper: pseudo-console creation, process spawn, stdin EOF bridging, and process-exit cleanup |
+| `win32-process.c` | 297 | Process watcher thread, `win32_launch_server()` (with job object breakaway for SSH survival), and child exit delivery |
+| `win32-terminfo.c` | 189 | Hardcoded xterm-256color terminal capability table (170+ entries) |
+| `win32-signal.c` | 131 | Signal emulation via console events, resize polling, self-pipe delivery |
+| `win32-tty.c` | 80 | Console mode management: raw VT mode, size queries, UTF-8 code page |
 
 ## Modified Files
 
@@ -123,12 +134,12 @@ cross-platform differences are handled automatically:
 
 | File | Changes |
 |------|---------|
-| `spawn.c` | ConPTY spawn path; `environ_to_win32_block()` for Unicode env blocks; cmd.exe invocation |
+| `spawn.c` | ConPTY pane spawn path; `environ_to_win32_block()` for Unicode env blocks; shell-family-aware command construction for `cmd.exe`, PowerShell, `pwsh`, and POSIX shells |
 | `compat/imsg-buffer.c` | `WSAGetLastError()` for Winsock non-blocking errors; Windows sendmsg/recvmsg |
-| `tmux.c` | Shell detection (COMSPEC), label paths + validation, `/dev/null` → `NUL` for `-f`, `-S` path sanitization, `checkshell()` Unix path guard |
-| `job.c` | ConPTY for PTY jobs; `win32_process_spawn()` for non-PTY jobs; no fork/setsid |
+| `tmux.c` | Shell-family detection (`cmd.exe`, PowerShell, `pwsh`, POSIX shells), path normalization, COMSPEC fallback, `/dev/null` → `NUL` for `-f`, `-S` path sanitization, `checkshell()` Unix path guard |
+| `job.c` | ConPTY-backed job launch on Windows, shell-family-aware command construction for `JOB_DEFAULTSHELL` consumers, helper-job `cmd.exe` compatibility, and output cleanup |
 | `proc.c` | Signal pipe integration; `proc_fork_and_daemon()` via CreateProcess; closesocket |
-| `client.c` | TCP IPC connection with poll-retry; `win32_launch_server()` fallback; tty channel with token auth; client-driven resize via `MSG_RESIZE` |
+| `client.c` | TCP IPC connection with poll-retry; `win32_launch_server()` fallback; tty channel with token auth; client-driven resize via `MSG_RESIZE`; `tmux -c` shell-family dispatch |
 | `input.c` | Conditional includes; input handling adjustments |
 | `server.c` | `win32_ipc_create_server()`; label-based identification; nonce verification; tty channel correlation; bounded pending TTY queue |
 | `server-client.c` | IPC client handling; `MSG_RESIZE` with `msg_resize_data` payload; `MSG_IDENTIFY_TTYTOKEN` |
@@ -150,7 +161,7 @@ The remaining ~45 files have 2-12 line changes each, primarily:
 
 ## Regression Tests
 
-CI runs 9 test scripts (230+ assertions plus native Unicode console checks).
+CI runs 8 test scripts (230+ assertions plus native Unicode console checks).
 Windows-specific tests are in `regress/`. An additional manual Unicode script,
 `win32-unicode.sh`, covers raw-VT rendering and shell spawnability outside the
 CI gate. Run with:
@@ -160,7 +171,7 @@ TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-basic.sh
 TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-claude-swarm.sh
 ```
 
-### win32-basic.sh (8 tests)
+### win32-basic.sh (13 tests)
 
 1. Session lifecycle (new, ls, kill-session)
 2. Send-keys + capture-pane (ConPTY I/O)
@@ -170,6 +181,13 @@ TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-claude-swarm.sh
 6. `-f /dev/null` → `NUL` translation
 7. `-S` with Unix-style path (basename extraction + warning)
 8. `default-shell` fallback from Unix path to `cmd.exe`
+9. Supported Windows shell families across `default-command`, one-argument
+   `new-window`, and `tmux -c`
+10. Helper jobs stay on cmd-compatible `_PATH_BSHELL` semantics under non-cmd
+    `default-shell`
+11. `copy-pipe` jobs receive EOF and complete on Windows
+12. Unsupported Windows executables are rejected as `default-shell`
+13. `$SHELL` with a forward-slash Windows path seeds `default-shell` on startup
 
 ### win32-claude-swarm.sh (10 tests × 3 cycles)
 

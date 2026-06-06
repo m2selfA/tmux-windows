@@ -165,8 +165,14 @@ static const struct win32_terminfo_entry win32_terminfo[] = {
 	{ "Enmg",  "\033[?69h",            0, 0, 1 },
 	{ "Dsmg",  "\033[?69l",            0, 0, 1 },
 
-	/* Hyperlinks. */
-	{ "Hls",   "\033]8;%p1%s;%p2%s\033\\", 0, 0, 1 },
+	/*
+	 * Hyperlinks (OSC 8).
+	 *
+	 * Windows clients currently crash during attached redraw when hyperlink
+	 * sequences are emitted back to the host terminal. Keep parsing OSC 8
+	 * coming from applications in panes, but do not advertise Hls support on
+	 * the Windows client side until the redraw path is fixed.
+	 */
 
 	{ NULL, NULL, 0, 0, 0 }
 };
