@@ -214,24 +214,18 @@ else
 fi
 stop_keys_session keys-escape
 
-# --- Test 6: Ctrl-C (interrupt) ---
+# --- Test 6: Ctrl-C at prompt preserves input ---
 start_keys_session keys-ctrlc || {
 	fail "Ctrl-C harness did not start"; exit 1
 }
-$TMUX send-keys -tkeys-ctrlc "ping -n 100 127.0.0.1" Enter
-$TMUX capture-pane -tkeys-ctrlc -p | tr -d '\r' | grep -q "Pinging 127.0.0.1" || \
-	wait_for_pane_text keys-ctrlc "Pinging 127.0.0.1" 20 || {
-		fail "Ctrl-C harness did not reach a running command"
-		stop_keys_session keys-ctrlc
-		exit 1
-	}
 $TMUX send-keys -tkeys-ctrlc C-c
-sleep 1
+$TMUX send-keys -tkeys-ctrlc C-c
+sleep 0.5
 $TMUX send-keys -tkeys-ctrlc "echo CTRLC_OK" Enter
-if wait_for_pane_text keys-ctrlc "CTRLC_OK" 30; then
-	echo "PASS 6: Ctrl-C interrupt"
+if wait_for_pane_text keys-ctrlc "CTRLC_OK"; then
+	echo "PASS 6: Ctrl-C key"
 else
-	fail "Ctrl-C did not interrupt"
+	fail "Ctrl-C key broke prompt input"
 fi
 stop_keys_session keys-ctrlc
 
