@@ -30,6 +30,33 @@ fail() {
 	FAIL=1
 }
 
+start_keys_session() {
+	KEYS_SESSION=$1
+
+	$TMUX kill-session -t"$KEYS_SESSION" 2>/dev/null
+	$TMUX $FNULL new -d -s"$KEYS_SESSION" -x 120 -y 24 cmd.exe < /dev/null || return 1
+	sleep 1
+}
+
+stop_keys_session() {
+	$TMUX kill-session -t"$1" 2>/dev/null
+}
+
+wait_for_pane_text() {
+	KEYS_SESSION=$1
+	PATTERN=$2
+	COUNT=0
+
+	while [ $COUNT -lt 20 ]; do
+		if $TMUX capture-pane -t"$KEYS_SESSION" -p | tr -d '\r' | grep -q "$PATTERN"; then
+			return 0
+		fi
+		sleep 0.5
+		COUNT=$((COUNT + 1))
+	done
+	return 1
+}
+
 format_string() {
 	case $1 in
 		*\')
@@ -120,143 +147,182 @@ prompt_backspace_case() {
 	stop_inner_client
 }
 
-$TMUX $FNULL new -d -skeys -x 120 -y 24 cmd.exe < /dev/null || exit 1
-sleep 1
-
 # --- Test 1: Enter key executes commands ---
-$TMUX send-keys -tkeys "echo KEY_ENTER_OK" Enter
-sleep 2
-$TMUX capture-pane -tkeys -p | tr -d '\r' | grep -q "KEY_ENTER_OK" || {
-	fail "Enter key did not execute command"; exit 1
+start_keys_session keys-enter || {
+	fail "Enter key harness did not start"; exit 1
 }
-echo "PASS 1: Enter key"
+$TMUX send-keys -tkeys-enter "echo KEY_ENTER_OK" Enter
+if wait_for_pane_text keys-enter "KEY_ENTER_OK"; then
+	echo "PASS 1: Enter key"
+else
+	fail "Enter key did not execute command"
+fi
+stop_keys_session keys-enter
 
 # --- Test 2: Literal characters arrive correctly ---
-$TMUX send-keys -tkeys "echo abcXYZ019" Enter
-sleep 2
-$TMUX capture-pane -tkeys -p | tr -d '\r' | grep -q "abcXYZ019" || {
-	fail "Literal characters not received"
+start_keys_session keys-literal || {
+	fail "Literal characters harness did not start"; exit 1
 }
-echo "PASS 2: Literal characters"
+$TMUX send-keys -tkeys-literal "echo abcXYZ019" Enter
+if wait_for_pane_text keys-literal "abcXYZ019"; then
+	echo "PASS 2: Literal characters"
+else
+	fail "Literal characters not received"
+fi
+stop_keys_session keys-literal
 
 # --- Test 3: Space key ---
-$TMUX send-keys -tkeys "echo" Space "SPACE_OK" Enter
-sleep 2
-$TMUX capture-pane -tkeys -p | tr -d '\r' | grep -q "SPACE_OK" || {
-	fail "Space key not working"
+start_keys_session keys-space || {
+	fail "Space key harness did not start"; exit 1
 }
-echo "PASS 3: Space key"
+$TMUX send-keys -tkeys-space "echo" Space "SPACE_OK" Enter
+if wait_for_pane_text keys-space "SPACE_OK"; then
+	echo "PASS 3: Space key"
+else
+	fail "Space key not working"
+fi
+stop_keys_session keys-space
 
 # --- Test 4: Tab key (command completion) ---
-# Type partial command and Tab — on cmd.exe, Tab cycles through files.
-# Simpler test: verify Tab character is sent by checking it doesn't break things.
-$TMUX send-keys -tkeys "echo TAB_OK" Tab Enter
-sleep 2
-# Tab might complete or not, but the echo should still work
-$TMUX capture-pane -tkeys -p | tr -d '\r' | grep -q "TAB_OK" || true
-echo "PASS 4: Tab key (no crash)"
+start_keys_session keys-tab || {
+	fail "Tab key harness did not start"; exit 1
+}
+$TMUX send-keys -tkeys-tab Tab
+sleep 0.5
+$TMUX send-keys -tkeys-tab C-c
+sleep 0.5
+$TMUX send-keys -tkeys-tab "echo TAB_OK" Enter
+if wait_for_pane_text keys-tab "TAB_OK"; then
+	echo "PASS 4: Tab key (no crash)"
+else
+	fail "Tab key broke input"
+fi
+stop_keys_session keys-tab
 
 # --- Test 5: Escape key (no crash, key is recognized) ---
-$TMUX send-keys -tkeys Escape
-sleep 0.5
-$TMUX send-keys -tkeys "echo ESC_OK" Enter
-sleep 2
-$TMUX capture-pane -tkeys -p | tr -d '\r' | grep -q "ESC_OK" || {
-	fail "Escape key broke input"
+start_keys_session keys-escape || {
+	fail "Escape key harness did not start"; exit 1
 }
-echo "PASS 5: Escape key"
+$TMUX send-keys -tkeys-escape Escape
+sleep 0.5
+$TMUX send-keys -tkeys-escape "echo ESC_OK" Enter
+if wait_for_pane_text keys-escape "ESC_OK"; then
+	echo "PASS 5: Escape key"
+else
+	fail "Escape key broke input"
+fi
+stop_keys_session keys-escape
 
 # --- Test 6: Ctrl-C (interrupt) ---
-# Send a long-running command, then Ctrl-C to interrupt
-$TMUX send-keys -tkeys "ping -n 100 127.0.0.1" Enter
-sleep 2
-$TMUX send-keys -tkeys C-c
-sleep 2
-# Verify we get back to a prompt (can type again)
-$TMUX send-keys -tkeys "echo CTRLC_OK" Enter
-sleep 2
-$TMUX capture-pane -tkeys -p | tr -d '\r' | grep -q "CTRLC_OK" || {
-	fail "Ctrl-C did not interrupt"
+start_keys_session keys-ctrlc || {
+	fail "Ctrl-C harness did not start"; exit 1
 }
-echo "PASS 6: Ctrl-C interrupt"
+$TMUX send-keys -tkeys-ctrlc "ping -n 100 127.0.0.1" Enter
+sleep 2
+$TMUX send-keys -tkeys-ctrlc C-c
+sleep 0.5
+$TMUX send-keys -tkeys-ctrlc "echo CTRLC_OK" Enter
+if wait_for_pane_text keys-ctrlc "CTRLC_OK"; then
+	echo "PASS 6: Ctrl-C interrupt"
+else
+	fail "Ctrl-C did not interrupt"
+fi
+stop_keys_session keys-ctrlc
 
 # --- Test 7: Arrow keys in copy-mode ---
-# Enter copy mode, move around, exit — verify no crash
-$TMUX send-keys -tkeys "echo line1" Enter "echo line2" Enter "echo line3" Enter
-sleep 1
-$TMUX copy-mode -tkeys
-sleep 0.5
-$TMUX send-keys -tkeys -X cursor-up
-$TMUX send-keys -tkeys -X cursor-up
-$TMUX send-keys -tkeys -X cursor-down
-$TMUX send-keys -tkeys -X cursor-left
-$TMUX send-keys -tkeys -X cursor-right
-$TMUX send-keys -tkeys -X cancel
-sleep 0.5
-# Verify pane is still functional
-$TMUX send-keys -tkeys "echo ARROW_OK" Enter
-sleep 2
-$TMUX capture-pane -tkeys -p | tr -d '\r' | grep -q "ARROW_OK" || {
-	fail "Arrow keys in copy mode broke pane"
+start_keys_session keys-arrow || {
+	fail "Arrow keys harness did not start"; exit 1
 }
-echo "PASS 7: Arrow keys in copy mode"
+$TMUX send-keys -tkeys-arrow "echo line1" Enter "echo line2" Enter "echo line3" Enter
+sleep 1
+$TMUX copy-mode -tkeys-arrow
+sleep 0.5
+$TMUX send-keys -tkeys-arrow -X cursor-up
+$TMUX send-keys -tkeys-arrow -X cursor-up
+$TMUX send-keys -tkeys-arrow -X cursor-down
+$TMUX send-keys -tkeys-arrow -X cursor-left
+$TMUX send-keys -tkeys-arrow -X cursor-right
+$TMUX send-keys -tkeys-arrow -X cancel
+sleep 0.5
+$TMUX send-keys -tkeys-arrow "echo ARROW_OK" Enter
+if wait_for_pane_text keys-arrow "ARROW_OK"; then
+	echo "PASS 7: Arrow keys in copy mode"
+else
+	fail "Arrow keys in copy mode broke pane"
+fi
+stop_keys_session keys-arrow
 
 # --- Test 8: Home/End in copy mode ---
-$TMUX copy-mode -tkeys
-sleep 0.5
-$TMUX send-keys -tkeys -X start-of-line
-$TMUX send-keys -tkeys -X end-of-line
-$TMUX send-keys -tkeys -X cancel
-sleep 0.5
-$TMUX send-keys -tkeys "echo HOMEEND_OK" Enter
-sleep 2
-$TMUX capture-pane -tkeys -p | tr -d '\r' | grep -q "HOMEEND_OK" || {
-	fail "Home/End keys broke pane"
+start_keys_session keys-homeend || {
+	fail "Home/End harness did not start"; exit 1
 }
-echo "PASS 8: Home/End in copy mode"
+$TMUX send-keys -tkeys-homeend "echo line1" Enter
+sleep 1
+$TMUX copy-mode -tkeys-homeend
+sleep 0.5
+$TMUX send-keys -tkeys-homeend -X start-of-line
+$TMUX send-keys -tkeys-homeend -X end-of-line
+$TMUX send-keys -tkeys-homeend -X cancel
+sleep 0.5
+$TMUX send-keys -tkeys-homeend "echo HOMEEND_OK" Enter
+if wait_for_pane_text keys-homeend "HOMEEND_OK"; then
+	echo "PASS 8: Home/End in copy mode"
+else
+	fail "Home/End keys broke pane"
+fi
+stop_keys_session keys-homeend
 
 # --- Test 9: PgUp/PgDn in copy mode ---
-# Generate enough output to scroll
-for i in $(seq 1 30); do
-	$TMUX send-keys -tkeys "echo scroll_line_$i" Enter
-done
-sleep 2
-$TMUX copy-mode -tkeys
-sleep 0.5
-$TMUX send-keys -tkeys -X page-up
-sleep 0.3
-$TMUX send-keys -tkeys -X page-down
-sleep 0.3
-$TMUX send-keys -tkeys -X cancel
-sleep 0.5
-$TMUX send-keys -tkeys "echo PGUPDN_OK" Enter
-sleep 2
-$TMUX capture-pane -tkeys -p | tr -d '\r' | grep -q "PGUPDN_OK" || {
-	fail "PgUp/PgDn broke pane"
+start_keys_session keys-pgupdn || {
+	fail "PgUp/PgDn harness did not start"; exit 1
 }
-echo "PASS 9: PgUp/PgDn in copy mode"
+for i in $(seq 1 30); do
+	$TMUX send-keys -tkeys-pgupdn "echo scroll_line_$i" Enter
+done
+sleep 1
+$TMUX copy-mode -tkeys-pgupdn
+sleep 0.5
+$TMUX send-keys -tkeys-pgupdn -X page-up
+sleep 0.3
+$TMUX send-keys -tkeys-pgupdn -X page-down
+sleep 0.3
+$TMUX send-keys -tkeys-pgupdn -X cancel
+sleep 0.5
+$TMUX send-keys -tkeys-pgupdn "echo PGUPDN_OK" Enter
+if wait_for_pane_text keys-pgupdn "PGUPDN_OK"; then
+	echo "PASS 9: PgUp/PgDn in copy mode"
+else
+	fail "PgUp/PgDn broke pane"
+fi
+stop_keys_session keys-pgupdn
 
 # --- Test 10: Function keys (no crash) ---
-# F1-F5 might trigger help or other actions, but shouldn't crash
-$TMUX send-keys -tkeys F1
-sleep 0.3
-$TMUX send-keys -tkeys Escape
-sleep 0.3
-$TMUX send-keys -tkeys "echo FKEY_OK" Enter
-sleep 2
-$TMUX capture-pane -tkeys -p | tr -d '\r' | grep -q "FKEY_OK" || {
-	fail "Function keys broke pane"
+start_keys_session keys-fkey || {
+	fail "Function keys harness did not start"; exit 1
 }
-echo "PASS 10: Function keys"
+$TMUX send-keys -tkeys-fkey F1
+sleep 0.3
+$TMUX send-keys -tkeys-fkey Escape
+sleep 0.3
+$TMUX send-keys -tkeys-fkey "echo FKEY_OK" Enter
+if wait_for_pane_text keys-fkey "FKEY_OK"; then
+	echo "PASS 10: Function keys"
+else
+	fail "Function keys broke pane"
+fi
+stop_keys_session keys-fkey
 
 # --- Test 11: BSpace (backspace) deletes characters ---
-# Type something, backspace, then check result
-$TMUX send-keys -tkeys "echo BSPXXX" BSpace BSpace BSpace "ACE_OK" Enter
-sleep 2
-$TMUX capture-pane -tkeys -p | tr -d '\r' | grep -q "BSPACE_OK" || {
-	fail "Backspace did not delete characters"
+start_keys_session keys-bspace || {
+	fail "Backspace harness did not start"; exit 1
 }
-echo "PASS 11: Backspace"
+$TMUX send-keys -tkeys-bspace "echo BSPXXX" BSpace BSpace BSpace "ACE_OK" Enter
+if wait_for_pane_text keys-bspace "BSPACE_OK"; then
+	echo "PASS 11: Backspace"
+else
+	fail "Backspace did not delete characters"
+fi
+stop_keys_session keys-bspace
 
 # Unicode prompt-editing coverage lives in regress/win32-unicode.sh because
 # send-keys does not reliably inject non-ASCII text into Windows shells.
@@ -274,14 +340,18 @@ prompt_backspace_case prompt-default 00 "" BSpace
 prompt_backspace_case prompt-ctrl-h 00 "set -s backspace C-h" C-h
 
 # --- Test 16: Multiple modifier combinations (no crash) ---
-$TMUX send-keys -tkeys C-a C-e C-k
-sleep 0.5
-$TMUX send-keys -tkeys "echo MOD_OK" Enter
-sleep 2
-$TMUX capture-pane -tkeys -p | tr -d '\r' | grep -q "MOD_OK" || {
-	fail "Modifier combinations broke pane"
+start_keys_session keys-mod || {
+	fail "Modifier combinations harness did not start"; exit 1
 }
-echo "PASS 16: Modifier combinations"
+$TMUX send-keys -tkeys-mod C-a C-e C-k
+sleep 0.5
+$TMUX send-keys -tkeys-mod "echo MOD_OK" Enter
+if wait_for_pane_text keys-mod "MOD_OK"; then
+	echo "PASS 16: Modifier combinations"
+else
+	fail "Modifier combinations broke pane"
+fi
+stop_keys_session keys-mod
 
 $TMUX kill-server 2>/dev/null
 
