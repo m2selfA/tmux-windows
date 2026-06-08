@@ -37,15 +37,17 @@ TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-basic.sh
 
 ## Test Suite
 
-CI runs 8 test scripts from `regress/`:
+CI runs 10 test scripts from `regress/`:
 - `win32-basic.sh` — core session/window/pane operations
 - `win32-claude-swarm.sh` — multi-session concurrent usage
 - `win32-format-strings.sh` — `#{...}` format engine (171 assertions)
 - `win32-conf-syntax.sh` — config file parsing (21 files)
-- `win32-keys.sh` — key handling (14 tests, including prefilled prompt Backspace and `set -s backspace C-h`; tests effects not raw codes)
+- `win32-keys.sh` — key handling (16 tests, including prompt `Ctrl-j`/`Enter`, prefilled prompt Backspace, and `set -s backspace C-h`; tests effects not raw codes)
+- `win32-terminal-semantics.sh` — pane-facing `Ctrl-j`/`Enter` byte semantics, bracketed paste behavior, prefix-table reset on paste delimiters, and large-input delivery integrity (6 tests)
 - `win32-has-session.sh` — exit code validation
 - `win32-layout.sh` — pane dimension verification (7 tests)
 - `win32-control-client.sh` — complex pane operations (6 tests)
+- `win32-native-unicode.sh` — ConPTY wide-character rewrite regression
 
 ## Winget Package Submission
 
@@ -102,3 +104,4 @@ Do **not** add a trailing blank line to manifest YAML files. Earlier versions (3
 ## Known Quirks
 
 - `source -n` hangs as a separate client on Windows (file-read protocol blocks)
+- Path-based file-read helpers such as `load-buffer` still share the Windows file-read blocking quirk; prefer `set-buffer` when a regression only needs in-memory paste data

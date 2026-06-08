@@ -2352,7 +2352,7 @@ out:
 	return (key);
 }
 
-/* Is this a bracket paste key? */
+/* Update bracket paste tracking for this client. */
 static int
 server_client_is_bracket_paste(struct client *c, key_code key)
 {
@@ -2506,9 +2506,17 @@ server_client_key_callback(struct cmdq_item *item, void *data)
 	if (KEYC_IS_MOUSE(key) && !options_get_number(s->options, "mouse"))
 		goto forward_key;
 
-	/* Forward if bracket pasting. */
-	if (server_client_is_bracket_paste (c, key))
+	/* Track bracket paste state and forward payload while active. */
+	if (server_client_is_bracket_paste(c, key))
 		goto paste_key;
+	if (KEYC_IS_PASTE(key) &&
+	    (!server_client_is_default_key_table(c, c->keytable) ||
+	    (c->flags & CLIENT_REPEAT))) {
+		server_client_set_key_table(c, NULL);
+		c->flags &= ~CLIENT_REPEAT;
+		server_status_client(c);
+		goto forward_key;
+	}
 
 	/* Treat everything as a regular key when pasting is detected. */
 	if (!KEYC_IS_MOUSE(key) &&

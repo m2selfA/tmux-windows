@@ -216,12 +216,23 @@ skipped (runs via cmd.exe on Windows).
 Port of upstream `conf-syntax.sh`. Validates all 21 `regress/conf/*.conf`
 files parse without error.
 
-### win32-keys.sh (14 tests)
+### win32-keys.sh (16 tests)
 
 Windows-specific key handling: Enter, literals, Space, Tab, Escape, Ctrl-C,
-arrow keys in copy mode, Home/End, PgUp/PgDn, F-keys, Backspace, prompt
-editing with prefilled input, `set -s backspace C-h`, and modifier combos.
-Tests key effects, not raw codes.
+arrow keys in copy mode, Home/End, PgUp/PgDn, F-keys, Backspace, prompt key
+semantics for `Ctrl-j` and `Enter`, prompt editing with prefilled input,
+`set -s backspace C-h`, and modifier combos. Tests key effects, not raw codes.
+
+### win32-terminal-semantics.sh (6 tests)
+
+Windows pane-facing terminal semantics. Verifies that `Ctrl-j` stays LF,
+`Enter` stays CR, that bracketed paste markers are stripped when the pane has
+not requested paste mode and preserved around chunked payload when the pane has
+enabled `CSI ? 2004 h`, that paste delimiters clear transient client key tables
+such as `prefix`, and that large pane input reaches the child process intact.
+The large-input case uses `set-buffer`/`paste-buffer` because path-based
+file-read helpers such as `load-buffer` still share the existing Windows
+file-read blocking quirk.
 
 ### win32-has-session.sh (3 tests)
 

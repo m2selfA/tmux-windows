@@ -669,23 +669,72 @@ client_exec(const char *shell, const char *shellcmd)
 }
 
 #ifdef _WIN32
+static int		 client_tty_write_all(HANDLE, const char *, DWORD);
+static int		 client_tty_send_all(SOCKET, const char *, size_t);
 /*
  * Tty relay: read from tty socket, write to console stdout.
  * This is the libevent callback fired when the server sends tty output.
  */
+static int
+client_tty_write_all(HANDLE h, const char *buf, DWORD len)
+{
+	DWORD	written, off = 0;
+
+	while (off < len) {
+		if (!WriteFile(h, buf + off, len - off, &written, NULL) ||
+		    written == 0)
+			return (-1);
+		off += written;
+	}
+	return (0);
+}
+
+static int
+client_tty_send_all(SOCKET fd, const char *buf, size_t len)
+{
+	fd_set		 wfds;
+	struct timeval	 tv;
+	size_t		 off = 0;
+	int		 n, err, ready;
+
+	while (off < len && client_tty_running) {
+		n = send(fd, buf + off, (int)(len - off), 0);
+		if (n > 0) {
+			off += (size_t)n;
+			continue;
+		}
+		if (n == 0)
+			return (-1);
+
+		err = WSAGetLastError();
+		if (err != WSAEWOULDBLOCK && err != WSAENOBUFS)
+			return (-1);
+
+		FD_ZERO(&wfds);
+		FD_SET(fd, &wfds);
+		tv.tv_sec = 0;
+		tv.tv_usec = 100000;
+		ready = select(0, NULL, &wfds, NULL, &tv);
+		if (ready == SOCKET_ERROR)
+			return (-1);
+	}
+	return (off == len ? 0 : -1);
+}
+
 static void
 client_tty_read_cb(int fd, __unused short events, __unused void *arg)
 {
 	char	buf[8192];
 	int	n;
-	DWORD	written;
 
 	n = recv((SOCKET)fd, buf, sizeof buf, 0);
 	if (n <= 0) {
 		event_del(&client_tty_event);
 		return;
 	}
-	WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), buf, n, &written, NULL);
+	if (client_tty_write_all(GetStdHandle(STD_OUTPUT_HANDLE), buf,
+	    (DWORD)n) != 0)
+		event_del(&client_tty_event);
 }
 
 /*
@@ -703,7 +752,7 @@ client_stdin_thread_func(LPVOID arg)
 	while (client_tty_running) {
 		if (!ReadFile(h, buf, sizeof buf, &nread, NULL) || nread == 0)
 			break;
-		if (send((SOCKET)fd, buf, (int)nread, 0) <= 0)
+		if (client_tty_send_all((SOCKET)fd, buf, nread) != 0)
 			break;
 	}
 	return (0);

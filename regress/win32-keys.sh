@@ -12,18 +12,112 @@ TERM=screen
 
 [ -z "$TEST_TMUX" ] && TEST_TMUX=$(readlink -f ../tmux)
 LABEL="test-$$"
+LABEL2="test2-$$"
 TMUX="$TEST_TMUX -L$LABEL"
 $TMUX kill-server 2>/dev/null
+TMUX2="$TEST_TMUX -L$LABEL2"
+$TMUX2 kill-server 2>/dev/null
 sleep 1
 
 FNULL="-fNUL"
 OUT=$(mktemp)
-trap "rm -f $OUT; $TMUX kill-server 2>/dev/null" 0 1 15
+PROMPT_OUT=$(mktemp)
+trap "rm -f $OUT $PROMPT_OUT; $TMUX kill-server 2>/dev/null; $TMUX2 kill-server 2>/dev/null" 0 1 15
 FAIL=0
 
 fail() {
 	echo "FAIL: $1"
 	FAIL=1
+}
+
+format_string() {
+	case $1 in
+		*\')
+			printf '"%%%%"'
+			;;
+		*)
+			printf "'%%%%'"
+			;;
+	esac
+}
+
+start_inner_client() {
+	INNER_SESSION=$1
+	SETUP_CMD=$2
+	RELAY_SESSION="${INNER_SESSION}-relay"
+	INNER_CLIENT=
+
+	$TMUX2 kill-server 2>/dev/null
+	$TMUX2 $FNULL new -d -s"$INNER_SESSION" -x 120 -y 24 cmd.exe < /dev/null || return 1
+	if [ -n "$SETUP_CMD" ]; then
+		$TMUX2 $SETUP_CMD || return 1
+	fi
+	$TMUX $FNULL new -d -s"$RELAY_SESSION" -- "$TEST_TMUX" "-L$LABEL2" attach -t "$INNER_SESSION" || return 1
+	sleep 2
+	INNER_CLIENT=$($TMUX2 list-clients -F '#{client_name}' | sed -n '1p')
+	[ -n "$INNER_CLIENT" ]
+}
+
+stop_inner_client() {
+	$TMUX kill-session -t"$RELAY_SESSION" 2>/dev/null
+	$TMUX2 kill-server 2>/dev/null
+}
+
+assert_prompt_key() {
+	KEYS=$1
+	EXPECTED=$2
+	NAME=$3
+	FORMAT=$(format_string "$EXPECTED")
+
+	start_inner_client "key-$NAME" "" || {
+		fail "$NAME prompt harness did not attach a client"; exit 1
+	}
+
+	: > "$PROMPT_OUT"
+	$TMUX2 command-prompt -t"$INNER_CLIENT" -k \
+		"display-message -pl $FORMAT" > "$PROMPT_OUT" &
+	PROMPT_PID=$!
+	sleep 0.1
+	$TMUX send-keys -t"$RELAY_SESSION" $KEYS
+	wait "$PROMPT_PID"
+
+	ACTUAL=$(tr -d '\r\n' < "$PROMPT_OUT")
+	if [ "$ACTUAL" != "$EXPECTED" ]; then
+		fail "$NAME key interpreted as '$ACTUAL'"
+	else
+		echo "PASS: $NAME key -> $ACTUAL"
+	fi
+
+	stop_inner_client
+}
+
+prompt_backspace_case() {
+	SESSION_NAME=$1
+	TARGET_VALUE=$2
+	SETUP_CMD=$3
+	ERASE_KEYS=$4
+
+	start_inner_client "$SESSION_NAME" "$SETUP_CMD" || {
+		fail "$SESSION_NAME prompt harness did not attach a client"; exit 1
+	}
+
+	: > "$PROMPT_OUT"
+	$TMUX2 command-prompt -t"$INNER_CLIENT" -I 'cmd.exe' \
+		"display-message -p -- '%%'" > "$PROMPT_OUT" &
+	PROMPT_PID=$!
+	sleep 0.5
+	$TMUX send-keys -t"$RELAY_SESSION" \
+		$ERASE_KEYS $ERASE_KEYS $ERASE_KEYS $ERASE_KEYS $ERASE_KEYS $ERASE_KEYS $ERASE_KEYS 0 0 Enter
+	wait "$PROMPT_PID"
+
+	PROMPT_VALUE=$(tr -d '\r\n' < "$PROMPT_OUT")
+	if [ "$PROMPT_VALUE" != "$TARGET_VALUE" ]; then
+		fail "$SESSION_NAME prompt backspace editing produced '$PROMPT_VALUE'"
+	else
+		echo "PASS: $SESSION_NAME prompt backspace"
+	fi
+
+	stop_inner_client
 }
 
 $TMUX $FNULL new -d -skeys -x 120 -y 24 cmd.exe < /dev/null || exit 1
@@ -167,7 +261,19 @@ echo "PASS 11: Backspace"
 # Unicode prompt-editing coverage lives in regress/win32-unicode.sh because
 # send-keys does not reliably inject non-ASCII text into Windows shells.
 
-# --- Test 12: Multiple modifier combinations (no crash) ---
+# --- Test 12: Ctrl-J stays distinct from Enter in prompt key mode ---
+assert_prompt_key C-j C-j ctrl-j
+
+# --- Test 13: Enter is still Enter in prompt key mode ---
+assert_prompt_key Enter Enter enter
+
+# --- Test 14: BSpace edits prefilled command-prompt input ---
+prompt_backspace_case prompt-default 00 "" BSpace
+
+# --- Test 15: BSpace edits prefilled command-prompt input with C-h ---
+prompt_backspace_case prompt-ctrl-h 00 "set -s backspace C-h" C-h
+
+# --- Test 16: Multiple modifier combinations (no crash) ---
 $TMUX send-keys -tkeys C-a C-e C-k
 sleep 0.5
 $TMUX send-keys -tkeys "echo MOD_OK" Enter
@@ -175,7 +281,7 @@ sleep 2
 $TMUX capture-pane -tkeys -p | tr -d '\r' | grep -q "MOD_OK" || {
 	fail "Modifier combinations broke pane"
 }
-echo "PASS 12: Modifier combinations"
+echo "PASS 16: Modifier combinations"
 
 $TMUX kill-server 2>/dev/null
 

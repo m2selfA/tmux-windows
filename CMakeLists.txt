@@ -332,6 +332,20 @@ endif()
 # Install
 install(TARGETS tmux RUNTIME DESTINATION bin)
 
+add_executable(win32-terminal-probe
+    win32/terminal-probe.c
+)
+target_link_libraries(win32-terminal-probe PRIVATE
+    kernel32
+)
+if(MSVC)
+    target_compile_options(win32-terminal-probe PRIVATE
+        /W3
+        /wd4996
+    )
+    set_property(TARGET win32-terminal-probe PROPERTY C_STANDARD 11)
+endif()
+
 # Print summary
 message(STATUS "")
 message(STATUS "tmux Windows build configuration:")

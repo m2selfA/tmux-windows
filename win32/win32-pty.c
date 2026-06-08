@@ -57,6 +57,57 @@ close_socket_once(SOCKET *sock)
 		closesocket(s);
 }
 
+static int
+pty_socket_send_all(SOCKET sock, const char *buf, size_t len)
+{
+	fd_set		 wfds;
+	struct timeval	 tv;
+	size_t		 off = 0;
+	int		 n, err, ready;
+
+	while (off < len) {
+		n = send(sock, buf + off, (int)(len - off), 0);
+		if (n > 0) {
+			off += (size_t)n;
+			continue;
+		}
+		if (n == 0)
+			return (-1);
+
+		err = WSAGetLastError();
+		if (err != WSAEWOULDBLOCK && err != WSAENOBUFS)
+			return (-1);
+
+		FD_ZERO(&wfds);
+		FD_SET(sock, &wfds);
+		tv.tv_sec = 0;
+		tv.tv_usec = 100000;
+		ready = select(0, NULL, &wfds, NULL, &tv);
+		if (ready == SOCKET_ERROR)
+			return (-1);
+	}
+	return (0);
+}
+
+static int
+pty_handle_write_all(HANDLE h, const char *buf, size_t len)
+{
+	DWORD	 written, chunk;
+	size_t	 off = 0;
+
+	while (off < len) {
+		if (len - off > 0xffffffffUL)
+			chunk = 0xffffffffUL;
+		else
+			chunk = (DWORD)(len - off);
+		if (!WriteFile(h, buf + off, chunk, &written, NULL) ||
+		    written == 0)
+			return (-1);
+		off += written;
+	}
+	return (0);
+}
+
 /* Output bridge: reads from ConPTY pipe, sends to socket (child -> server). */
 static DWORD WINAPI
 pty_bridge_thread(LPVOID arg)
@@ -71,7 +122,7 @@ pty_bridge_thread(LPVOID arg)
 		if (n == 0)
 			break;
 		/* Write to bridge socket so libevent can pick it up. */
-		if (send(pty->bridge_peer, buf, (int)n, 0) <= 0)
+		if (pty_socket_send_all(pty->bridge_peer, buf, n) != 0)
 			break;
 	}
 
@@ -87,7 +138,6 @@ pty_input_thread(LPVOID arg)
 	struct win32_pty *pty = (struct win32_pty *)arg;
 	char buf[4096];
 	int n;
-	DWORD written;
 	int saw_input = 0;
 
 	while (!pty->closing) {
@@ -95,7 +145,7 @@ pty_input_thread(LPVOID arg)
 		if (n <= 0)
 			break;
 		saw_input = 1;
-		if (!WriteFile(pty->hPipeIn, buf, (DWORD)n, &written, NULL))
+		if (pty_handle_write_all(pty->hPipeIn, buf, (size_t)n) != 0)
 			break;
 	}
 	/*
@@ -350,11 +400,9 @@ win32_pty_get_process(struct win32_pty *pty)
 int
 win32_pty_write(struct win32_pty *pty, const void *data, size_t len)
 {
-	DWORD written;
-
 	if (pty == NULL || pty->hPipeIn == NULL)
 		return (-1);
-	if (!WriteFile(pty->hPipeIn, data, (DWORD)len, &written, NULL))
+	if (pty_handle_write_all(pty->hPipeIn, data, len) != 0)
 		return (-1);
-	return (int)written;
+	return ((int)len);
 }

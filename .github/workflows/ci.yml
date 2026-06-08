@@ -82,6 +82,14 @@ jobs:
           sleep 2
           TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-keys.sh
 
+      - name: Run terminal semantics tests
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          taskkill //F //IM tmux.exe 2>/dev/null || true
+          sleep 2
+          TEST_TMUX=./build/Debug/tmux.exe bash regress/win32-terminal-semantics.sh
+
       - name: Run has-session tests
         shell: bash
         run: |
