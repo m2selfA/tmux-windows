@@ -45,9 +45,10 @@ stop_keys_session() {
 wait_for_pane_text() {
 	KEYS_SESSION=$1
 	PATTERN=$2
+	MAX=${3:-20}
 	COUNT=0
 
-	while [ $COUNT -lt 20 ]; do
+	while [ $COUNT -lt "$MAX" ]; do
 		if $TMUX capture-pane -t"$KEYS_SESSION" -p | tr -d '\r' | grep -q "$PATTERN"; then
 			return 0
 		fi
@@ -218,11 +219,16 @@ start_keys_session keys-ctrlc || {
 	fail "Ctrl-C harness did not start"; exit 1
 }
 $TMUX send-keys -tkeys-ctrlc "ping -n 100 127.0.0.1" Enter
-sleep 2
+$TMUX capture-pane -tkeys-ctrlc -p | tr -d '\r' | grep -q "Pinging 127.0.0.1" || \
+	wait_for_pane_text keys-ctrlc "Pinging 127.0.0.1" 20 || {
+		fail "Ctrl-C harness did not reach a running command"
+		stop_keys_session keys-ctrlc
+		exit 1
+	}
 $TMUX send-keys -tkeys-ctrlc C-c
-sleep 0.5
+sleep 1
 $TMUX send-keys -tkeys-ctrlc "echo CTRLC_OK" Enter
-if wait_for_pane_text keys-ctrlc "CTRLC_OK"; then
+if wait_for_pane_text keys-ctrlc "CTRLC_OK" 30; then
 	echo "PASS 6: Ctrl-C interrupt"
 else
 	fail "Ctrl-C did not interrupt"
